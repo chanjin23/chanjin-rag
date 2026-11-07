@@ -39,7 +39,7 @@ PRD에서 정한 기능을 어떤 기술로, 어떤 구조로 만들지 정한 �
 | 작업 큐 | PostgreSQL `jobs` 테이블 + `SELECT … FOR UPDATE SKIP LOCKED` | 별도 브로커 없음 |
 | 예약 작업 | APScheduler(Worker 안) | 자정 한도 초기화, 매일 백업, 로컬 삭제 문서 영구 삭제, 끊긴 동기화 실행 정리, 오래된 임시 파일 정리 |
 | 질의 흐름 | LangGraph | LangChain 체인과 래퍼는 쓰지 않고 Provider를 직접 호출 |
-| 모델 호출 | openai SDK(`base_url`=NVIDIA), httpx, tenacity | 재정렬은 OpenAI 호환이 아니어서 httpx로 호출 |
+| 모델 호출 | openai SDK 2.x(`base_url`=NVIDIA), httpx, tenacity | 재정렬은 OpenAI 호환이 아니어서 httpx로 호출. openai 3.x는 httpx 대신 httpx2를 써서 2.x로 고정 |
 | 한국어 형태소 | kiwipiepy | BM25용 사전 토큰화 |
 | 토큰 수 계산 | tiktoken(o200k\_base) 근사 | 청크 길이 기준. 실제 한도는 API의 `truncate=END`로 보호 |
 | 문서 파서 | PyMuPDF, python-docx, openpyxl, python-pptx, lxml(HWPX), pyhwp(HWP), charset-normalizer | 3.4 참고 |
@@ -349,7 +349,7 @@ Worker는 하나의 프로세스에서 작업 루프와 APScheduler를 함께 �
 - 수정 파일의 재임베딩도 1개로 셉니다. 질문 임베딩은 세지 않습니다.
 - 한도 값은 `EMBED_DAILY_FILE_LIMIT` 설정으로 바꿀 수 있습니다.
 
-**재시도:** API 오류(429, 5xx, 타임아웃)는 tenacity로 지수 백오프합니다(최대 5회, 최대 대기 60초). 429가 계속되면 해당 작업을 `run_after`를 30분 뒤로 미뤄 반납합니다.
+**재시도:** API 오류(429, 5xx, 타임아웃)는 tenacity로 지수 백오프합니다(최대 5회, 최대 대기 60초). openai SDK 자체 재시도는 끕니다. 끝까지 실패하면 Provider 전용 예외로 바꿉니다: 429 → `RateLimited`, 5xx·타임아웃·연결 실패 → `ProviderUnavailable`, 401·403 → `ProviderAuthError`(NVIDIA는 틀린 키에 403 `Authorization failed`를 돌려줌, 재시도하지 않음). 429가 계속되면 해당 작업을 `run_after`를 30분 뒤로 미뤄 반납합니다. LLM 스트리밍은 응답 스트림을 여는 데까지만 재시도합니다. 호출마다 `provider.call` 로그(종류, 모델, 지연, 상태 코드, 재시도 횟수. 본문·키 제외)를 남깁니다.
 
 ### 6.3 청킹과 임베딩
 
@@ -363,7 +363,7 @@ Worker는 하나의 프로세스에서 작업 루프와 APScheduler를 함께 �
 
 **임베딩 호출**
 
-- 문서 청크는 `input_type=passage`, 질문은 `input_type=query`로 호출하고 `truncate=END`를 씁니다. 예제의 `extra_body` 형식을 그대로 따릅니다. 예제에 있던 `modality` 값은 텍스트 전용 값을 문서에서 확인해 설정합니다.
+- 문서 청크는 `input_type=passage`, 질문은 `input_type=query`로 호출하고 `truncate=END`, `modality=text`, `encoding_format=float`, `dimensions=EMBED_DIM`을 씁니다(`input_type`·`truncate`·`modality`는 openai SDK의 `extra_body`). 응답 차원이 `EMBED_DIM`과 다르면 `EmbeddingDimensionError`로 멈춥니다.
 - API 키는 모델마다 따로 발급되므로 `NVIDIA_LLM_API_KEY`, `NVIDIA_EMBED_API_KEY`, `NVIDIA_RERANK_API_KEY`를 각 Provider가 자기 것만 읽습니다. 예제처럼 `"$NVIDIA_API_KEY"` 문자열을 그대로 넣으면 인증이 실패합니다.
 - 청크마다 `embed_model`을 기록하고, 문서에는 모델명과 차원을 기록합니다. 설정의 모델이 바뀌면 `backend reindex --embeddings` 대상이 됩니다.
 
@@ -711,8 +711,11 @@ web/src/
 | `NVIDIA_BASE_URL` | `https://integrate.api.nvidia.com/v1` | |
 | `LLM_MODEL` | `nvidia/nemotron-3.5-lightning-30b-a3b` | 13장 비교로 선정. 예비 후보 `z-ai/glm-5.3-flash` |
 | `LLM_EXTRA_BODY` | `{"chat_template_kwargs":{"enable_thinking":false}}` | 모델별 추가 요청값(JSON). 추론 끄기(7.1) |
+| `LLM_TEMPERATURE`, `LLM_MAX_TOKENS` | `0.2`, `2048` | 7.1의 LLM 설정. 호출마다 덮어쓸 수 있음 |
+| `LLM_READ_TIMEOUT` | `180` | LLM 읽기 타임아웃(초). 무료 엔드포인트는 대기열이 길 수 있음(13장) |
+| `PROVIDER_READ_TIMEOUT` | `60` | 임베딩·재정렬 읽기 타임아웃(초) |
 | `EMBED_MODEL` | `nvidia/nemotron-3.5-embed-8b` | |
-| `RERANK_MODEL`, `RERANK_URL` | Nemotron 3.5 Rerank 8B | 엔드포인트는 모델 페이지 기준으로 설정 |
+| `RERANK_MODEL`, `RERANK_URL` | Nemotron 3.5 Rerank 8B, `https://ai.api.nvidia.com/v1/retrieval/nvidia/nemotron-3.5-rerank-8b/reranking` | 엔드포인트는 모델 페이지 기준(`scripts/check_nvidia.py`로 확인) |
 | `RERANK_ENABLED` | `true` | 평가 결과로 결정 |
 | `EMBED_DAILY_FILE_LIMIT` | `100` | |
 | `EMBED_DAILY_CHUNK_LIMIT` | `0`(제한 없음) | 13장 3번 실측 후 확정(6.2) |

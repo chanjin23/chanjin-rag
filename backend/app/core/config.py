@@ -51,11 +51,20 @@ class Settings(BaseSettings):
     llm_model: str = "nvidia/nemotron-3.5-lightning-30b-a3b"
     # 모델별 추가 요청값(.env에는 JSON 한 줄). 추론을 끄는 키가 모델마다 달라 값 그대로 보낸다.
     llm_extra_body: dict[str, Any] = {"chat_template_kwargs": {"enable_thinking": False}}
+    # PRD 검토값: temperature 0~0.3, max_tokens 1,024~2,048 (TRD 7.1)
+    llm_temperature: float = 0.2
+    llm_max_tokens: int = 2048
+    # 무료 엔드포인트는 대기열 때문에 응답 시작까지 1분 넘게 걸리기도 한다(TRD 13장)
+    llm_read_timeout: float = 180.0
+    # 임베딩·재정렬 읽기 타임아웃(초)
+    provider_read_timeout: float = 60.0
     embed_model: str = "nvidia/nemotron-3.5-embed-8b"
     # 모델 기본 4096차원은 halfvec HNSW 한도(4000)를 넘어서 `dimensions`로 줄인다(TRD 6.3)
     embed_dim: int = 2048
     rerank_model: str = "nvidia/nemotron-3.5-rerank-8b"
-    rerank_url: str | None = None
+    rerank_url: str = (
+        "https://ai.api.nvidia.com/v1/retrieval/nvidia/nemotron-3.5-rerank-8b/reranking"
+    )
     rerank_enabled: bool = True
 
     # 수집
