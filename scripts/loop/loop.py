@@ -58,9 +58,11 @@ SKIP_RE = re.compile(
 TEST_PATH_RE = re.compile(r"(^|/)(tests|e2e)/|(^|/)test_[^/]*\.py$|\.(spec|test)\.tsx?$")
 DOC_EXTS = {".pdf", ".hwp", ".hwpx", ".docx", ".xlsx", ".pptx", ".doc", ".xls", ".ppt"}
 
+# 한도 메시지 예: "You've hit your 5-hour limit · resets 1:10am (Asia/Seoul)"
+# JSON 출력의 api_error 값(usage_limit_reached 등)도 함께 검사하므로 밑줄 표기도 받는다.
 LIMIT_RE = re.compile(
-    r"usage limit|limit reached|hit your (usage )?limit|out of (extra )?usage|"
-    r"(session|weekly) limit|rate[_ ]limit",
+    r"usage[_ ]limit|limit[_ ]reached|hit your [\w -]{0,20}limit|out of (extra )?usage|"
+    r"(session|weekly|[\w-]+-hour) limit|rate[_ ]limit",
     re.IGNORECASE,
 )
 TRANSIENT_RE = re.compile(r"overloaded|\b529\b|api error: 5\d\d|ECONNRESET|ETIMEDOUT", re.I)
@@ -354,13 +356,18 @@ def run_claude(args: list[str], prompt: str, timeout_s: float, log_path: Path) -
     data = parse_json_output(out)
     failed = code != 0 or (data is not None and bool(data.get("is_error")))
     haystack = out + ("\n" + str(data.get("result", "")) if data else "")
+    # 메시지 문구는 바뀔 수 있으므로 구조화 필드(api_error_status, api_error)를 먼저 본다.
+    status = data.get("api_error_status") if data else None
+    api_error = str(data.get("api_error") or "") if data else ""
+    limited = status == 429 or bool(LIMIT_RE.search(api_error)) or bool(LIMIT_RE.search(haystack))
+    server_error = isinstance(status, int) and status >= 500
     return ClaudeResult(
         exit_code=code,
         output=out,
         data=data,
         timed_out=timed_out,
-        usage_limited=failed and bool(LIMIT_RE.search(haystack)),
-        transient=failed and bool(TRANSIENT_RE.search(haystack)),
+        usage_limited=failed and limited,
+        transient=failed and (server_error or bool(TRANSIENT_RE.search(haystack))),
         no_session=failed and bool(NO_SESSION_RE.search(haystack)),
         reset_at=parse_reset(haystack) if failed else None,
         duration_s=time.monotonic() - start,
@@ -982,7 +989,9 @@ def main() -> int:
             print(load_prompt("implement.md", prompt_values(first, cfg, 1, "")))
         return 0
 
-    in_progress = [tid for tid, ts in state["tasks"].items() if ts.get("status") == "in_progress"]
+    # --retry-blocked이면 막힌 작업이 남긴 변경도 이어서 쓸 작업물로 본다.
+    resumable = {"in_progress", "blocked"} if args.retry_blocked else {"in_progress"}
+    in_progress = [tid for tid, ts in state["tasks"].items() if ts.get("status") in resumable]
     dirty = bool(git("status", "--porcelain").strip())
     if dirty and not in_progress:
         say("커밋되지 않은 변경이 있는데 진행 중인 작업이 없습니다. 정리한 뒤 실행하세요.")
