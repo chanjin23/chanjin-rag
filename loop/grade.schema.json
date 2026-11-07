@@ -1,0 +1,40 @@
+{
+  "type": "object",
+  "properties": {
+    "breakdown": {
+      "type": "object",
+      "properties": {
+        "requirements": { "$ref": "#/$defs/item" },
+        "edge_cases": { "$ref": "#/$defs/item" },
+        "tests": { "$ref": "#/$defs/item" },
+        "code_quality": { "$ref": "#/$defs/item" },
+        "observability_ux": { "$ref": "#/$defs/item" }
+      },
+      "required": ["requirements", "edge_cases", "tests", "code_quality", "observability_ux"]
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string" },
+          "evidence": { "type": "string" }
+        },
+        "required": ["title", "evidence"]
+      }
+    },
+    "feedback": { "type": "array", "items": { "type": "string" } },
+    "summary": { "type": "string" }
+  },
+  "required": ["breakdown", "blockers", "feedback", "summary"],
+  "$defs": {
+    "item": {
+      "type": "object",
+      "properties": {
+        "score": { "type": "integer", "minimum": 0 },
+        "reason": { "type": "string" }
+      },
+      "required": ["score", "reason"]
+    }
+  }
+}

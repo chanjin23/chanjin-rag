@@ -1,5 +1,15 @@
-import { defineConfig } from "@playwright/test";
+import path from "node:path";
+import { defineConfig, type ReporterDescription } from "@playwright/test";
 import { API_PORT, API_URL, BACKEND_LOG, WEB_PORT, WEB_URL } from "./e2e/env";
+
+// 루프 실행기가 LOOP_REPORT_DIR을 주면 JSON 리포트도 남긴다(필수 E2E를 제목으로 확인하는 데 씀).
+const reporters: ReporterDescription[] = [
+  ["list"],
+  ["html", { outputFolder: "./e2e/.report", open: "never" }],
+];
+if (process.env.LOOP_REPORT_DIR) {
+  reporters.push(["json", { outputFile: path.join(process.env.LOOP_REPORT_DIR, "e2e.json") }]);
+}
 
 /**
  * E2E: 백엔드(FastAPI)와 웹(Vite)을 E2E 전용 포트로 직접 띄우고, 설치된 Chrome으로 화면을 조작한다.
@@ -13,7 +23,7 @@ export default defineConfig({
   workers: 1,
   timeout: 30_000,
   expect: { timeout: 5_000 },
-  reporter: [["list"], ["html", { outputFolder: "./e2e/.report", open: "never" }]],
+  reporter: reporters,
   use: {
     baseURL: WEB_URL,
     channel: "chrome",

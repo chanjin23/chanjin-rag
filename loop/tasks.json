@@ -1,0 +1,358 @@
+{
+  "tasks": [
+    {
+      "id": "T00",
+      "title": "루프 기반: 테스트 DB, Fake Provider, 로그 규칙",
+      "depends": [],
+      "pytest": [
+        "test_test_db.py::test_extensions_available",
+        "test_providers_fake.py::test_fake_embedding_is_deterministic",
+        "test_providers_fake.py::test_fake_llm_streams_tokens",
+        "test_logging_policy.py::test_query_text_not_logged_by_default",
+        "test_logging_policy.py::test_query_text_logged_when_enabled"
+      ],
+      "e2e": ["chat.spec.ts > 화면에서 보낸 질문이 백엔드 로그에 남고, 답변이 스트리밍된다"],
+      "log_events": ["chat.message.received"],
+      "extra_checks": []
+    },
+    {
+      "id": "T01",
+      "title": "DB 스키마와 Alembic 마이그레이션",
+      "depends": ["T00"],
+      "pytest": [
+        "test_migrations.py::test_upgrade_then_downgrade",
+        "test_schema.py::test_path_key_unique",
+        "test_schema.py::test_vector_and_bm25_indexes_exist",
+        "test_schema.py::test_sync_config_seeded"
+      ],
+      "e2e": [],
+      "log_events": [],
+      "extra_checks": []
+    },
+    {
+      "id": "T02",
+      "title": "인증: 세션 로그인, 잠금, CSRF, 로그인 화면",
+      "depends": ["T01"],
+      "pytest": [
+        "test_auth.py::test_login_sets_secure_session_cookie",
+        "test_auth.py::test_lockout_after_five_failures",
+        "test_auth.py::test_csrf_rejects_missing_header_or_origin",
+        "test_auth.py::test_session_sliding_expiry",
+        "test_auth.py::test_bearer_token_revoked_rejected",
+        "test_auth_cli.py::test_create_user_and_reset_password"
+      ],
+      "e2e": [
+        "auth.spec.ts > 로그인하면 채팅 화면으로 이동한다",
+        "auth.spec.ts > 비밀번호를 5번 틀리면 잠금 남은 시간이 보인다",
+        "auth.spec.ts > 세션이 만료되면 입력 중인 질문이 보존된다"
+      ],
+      "log_events": ["auth.login.succeeded", "auth.login.failed", "auth.login.locked"],
+      "extra_checks": []
+    },
+    {
+      "id": "T03",
+      "title": "NVIDIA Provider 구현과 재시도",
+      "depends": ["T00"],
+      "pytest": [
+        "test_providers_nvidia.py::test_embedding_request_uses_input_type_and_truncate",
+        "test_providers_nvidia.py::test_retries_429_then_succeeds",
+        "test_providers_nvidia.py::test_gives_up_after_five_attempts",
+        "test_providers_nvidia.py::test_auth_error_not_retried",
+        "test_providers_nvidia.py::test_rerank_request_shape",
+        "test_providers_nvidia.py::test_llm_strips_thinking_text",
+        "test_providers_nvidia.py::test_dimension_mismatch_raises"
+      ],
+      "e2e": [],
+      "log_events": [],
+      "extra_checks": []
+    },
+    {
+      "id": "T04",
+      "title": "문서 파서 7종",
+      "depends": ["T00"],
+      "pytest": [
+        "test_parsers.py::test_pdf_pages_and_scanned_page_warning",
+        "test_parsers.py::test_docx_heading_path_and_tables",
+        "test_parsers.py::test_xlsx_header_and_formula_values",
+        "test_parsers.py::test_pptx_slide_order_and_notes",
+        "test_parsers.py::test_hwpx_sections_and_tables",
+        "test_parsers.py::test_txt_cp949_detection",
+        "test_parsers.py::test_md_heading_path",
+        "test_parsers.py::test_encrypted_pdf_failure_code",
+        "test_parsers.py::test_corrupted_file_failure_code",
+        "test_parsers.py::test_empty_document_is_no_text",
+        "test_parsers.py::test_parser_timeout_in_subprocess",
+        "test_parsers_samples.py::test_sample_docs_parse"
+      ],
+      "e2e": [],
+      "log_events": [],
+      "extra_checks": []
+    },
+    {
+      "id": "T05",
+      "title": "구조 기반 청킹과 Kiwi 토큰화",
+      "depends": ["T04"],
+      "pytest": [
+        "test_chunking.py::test_chunk_token_range_and_overlap",
+        "test_chunking.py::test_paragraph_not_split_unless_too_long",
+        "test_chunking.py::test_table_chunks_repeat_header",
+        "test_chunking.py::test_pptx_one_slide_per_chunk",
+        "test_chunking.py::test_heading_prefix_only_in_embed_text",
+        "test_chunking.py::test_meta_only_single_filename_chunk",
+        "test_tokenize.py::test_keeps_content_pos_drops_particles",
+        "test_tokenize.py::test_compound_noun_expansion",
+        "test_tokenize.py::test_same_function_for_query_and_document",
+        "test_tokenize.py::test_user_dictionary_applied"
+      ],
+      "e2e": [],
+      "log_events": [],
+      "extra_checks": []
+    },
+    {
+      "id": "T06",
+      "title": "작업 큐와 Ingestion Worker",
+      "depends": ["T01", "T03", "T05"],
+      "pytest": [
+        "test_jobs.py::test_skip_locked_single_consumer",
+        "test_jobs.py::test_stale_lock_requeued",
+        "test_jobs.py::test_extract_deletes_original_even_on_failure",
+        "test_jobs.py::test_no_text_document_state",
+        "test_jobs.py::test_index_replaces_chunks_atomically",
+        "test_jobs.py::test_quota_charged_once_per_version",
+        "test_jobs.py::test_quota_exhausted_waits_until_kst_midnight",
+        "test_jobs.py::test_unchanged_chunks_reuse_embeddings_without_quota",
+        "test_jobs.py::test_stale_version_result_discarded",
+        "test_jobs.py::test_daily_chunk_limit_guard",
+        "test_jobs.py::test_rate_limited_job_requeued_without_recharge",
+        "test_ingest_local.py::test_ingest_local_processes_folder"
+      ],
+      "e2e": [],
+      "log_events": [],
+      "extra_checks": []
+    },
+    {
+      "id": "T07",
+      "title": "Sync API: manifest 판정, 업로드, 실행 기록",
+      "depends": ["T02", "T06"],
+      "pytest": [
+        "test_sync_manifest.py::test_new_file_upload",
+        "test_sync_manifest.py::test_same_hash_noop",
+        "test_sync_manifest.py::test_move_updates_path_only",
+        "test_sync_manifest.py::test_copy_duplicates_chunks_without_quota",
+        "test_sync_manifest.py::test_missing_marks_locally_deleted",
+        "test_sync_manifest.py::test_scan_error_holds_deletion",
+        "test_sync_manifest.py::test_mass_delete_guard_holds_all",
+        "test_sync_manifest.py::test_restored_clears_flag",
+        "test_sync_manifest.py::test_over_limit_is_meta_only",
+        "test_sync_manifest.py::test_needs_upload_requested",
+        "test_sync_upload.py::test_hash_mismatch_returns_409",
+        "test_sync_upload.py::test_path_outside_root_rejected",
+        "test_sync_upload.py::test_fixed_exclude_rejected",
+        "test_sync_upload.py::test_extension_whitelist_case_insensitive",
+        "test_sync_upload.py::test_requires_bearer_token",
+        "test_sync_runs.py::test_stale_run_abandoned"
+      ],
+      "e2e": [],
+      "log_events": [],
+      "extra_checks": []
+    },
+    {
+      "id": "T08",
+      "title": "Windows Sync Agent",
+      "depends": ["T07"],
+      "pytest": [
+        "test_scan.py::test_fixed_excludes_are_root_anchored",
+        "test_scan.py::test_extension_case_insensitive_and_skip_stats",
+        "test_scan.py::test_hash_cache_reuse",
+        "test_scan.py::test_locked_file_reported_as_scan_error",
+        "test_scan.py::test_paths_nfc_normalized",
+        "test_protocol.py::test_run_accepts_only_source",
+        "test_protocol.py::test_reveal_requires_64_hex",
+        "test_protocol.py::test_reveal_rejects_outside_root_or_missing",
+        "test_protocol.py::test_reveal_invokes_explorer_with_arg_list",
+        "test_protocol.py::test_protocol_rate_limit",
+        "test_sync_flow.py::test_full_sync_against_fake_server",
+        "test_sync_flow.py::test_upload_failure_goes_to_retry_queue",
+        "test_sync_flow.py::test_single_instance_exits",
+        "test_install.py::test_install_dry_run_prints_task_and_registry"
+      ],
+      "e2e": [],
+      "log_events": [],
+      "extra_checks": []
+    },
+    {
+      "id": "T09",
+      "title": "Hybrid 검색",
+      "depends": ["T06"],
+      "pytest": [
+        "test_search.py::test_rrf_merges_vector_and_bm25",
+        "test_search.py::test_unembedded_chunks_found_by_bm25",
+        "test_search.py::test_directory_ext_mtime_filters",
+        "test_search.py::test_include_deleted_toggle",
+        "test_search.py::test_max_three_chunks_per_document",
+        "test_search.py::test_coverage_counts_with_filters"
+      ],
+      "e2e": [],
+      "log_events": [],
+      "extra_checks": []
+    },
+    {
+      "id": "T10",
+      "title": "LangGraph 질의 그래프와 SSE 연결",
+      "depends": ["T02", "T03", "T09"],
+      "pytest": [
+        "test_graph.py::test_no_history_skips_rewrite",
+        "test_graph.py::test_retry_once_then_not_found",
+        "test_graph.py::test_invalid_citations_removed",
+        "test_graph.py::test_summarize_target_resolution",
+        "test_graph.py::test_empty_filter_result_message",
+        "test_chat_sse.py::test_event_order_answer",
+        "test_chat_sse.py::test_event_order_not_found",
+        "test_chat_sse.py::test_event_order_summarize",
+        "test_chat_sse.py::test_error_event_has_retryable",
+        "test_chat_sse.py::test_conflict_409_while_streaming",
+        "test_chat_sse.py::test_disconnect_saves_aborted",
+        "test_chat_sse.py::test_query_log_saved_with_coverage"
+      ],
+      "e2e": [
+        "chat.spec.ts > 질문하면 단계 표시 후 출처가 붙은 답변이 스트리밍된다",
+        "chat.spec.ts > 문서에 없는 질문은 찾지 못함과 검색 범위를 보여준다",
+        "chat.spec.ts > 빈 입력은 보내지 않는다"
+      ],
+      "log_events": ["chat.message.received", "chat.message.completed", "chat.message.not_found"],
+      "extra_checks": []
+    },
+    {
+      "id": "T11",
+      "title": "채팅 화면: 대화 관리, 출처 패널, 인용, 피드백",
+      "depends": ["T10"],
+      "pytest": [
+        "test_conversations.py::test_crud_and_cascade_delete",
+        "test_conversations.py::test_title_from_first_question",
+        "test_feedback.py::test_feedback_upsert_with_reason"
+      ],
+      "e2e": [
+        "chat.spec.ts > 인용 칩을 누르면 출처 패널의 해당 항목이 열린다",
+        "chat.spec.ts > 대화 이름을 바꾸고 삭제할 수 있다",
+        "chat.spec.ts > 답변의 외부 이미지와 링크는 불러오지 않는다",
+        "chat.spec.ts > 오류 응답에는 다시 시도 버튼이 보인다",
+        "chat.spec.ts > 답변에 피드백을 남길 수 있다",
+        "chat.spec.ts > 입력창 위에 색인 범위가 보인다"
+      ],
+      "log_events": ["conversation.created", "conversation.renamed", "conversation.deleted", "feedback.saved"],
+      "extra_checks": []
+    },
+    {
+      "id": "T12",
+      "title": "문서 화면: 상태, 상세, 재처리, 영구 삭제",
+      "depends": ["T11"],
+      "pytest": [
+        "test_documents_api.py::test_list_filters_and_pagination",
+        "test_documents_api.py::test_reprocess_failed_sets_needs_upload",
+        "test_documents_api.py::test_reprocess_ready_rechunks_from_sections",
+        "test_documents_api.py::test_purge_removes_all_and_masks_citations"
+      ],
+      "e2e": [
+        "documents.spec.ts > 상태 탭으로 문서를 거를 수 있다",
+        "documents.spec.ts > 실패 문서의 사유와 해결 안내가 보인다",
+        "documents.spec.ts > 재처리하면 다음 동기화 대기로 표시된다",
+        "documents.spec.ts > 영구 삭제하면 목록과 검색에서 사라진다",
+        "documents.spec.ts > 인용에서 문서 상세로 이동하면 위치가 강조된다"
+      ],
+      "log_events": ["documents.reprocess.requested", "documents.purged"],
+      "extra_checks": []
+    },
+    {
+      "id": "T13",
+      "title": "동기화 화면: 상태, 범위 설정, 지금 동기화",
+      "depends": ["T07", "T11"],
+      "pytest": [
+        "test_settings_sync.py::test_root_must_be_under_dev",
+        "test_settings_sync.py::test_preview_counts_without_saving",
+        "test_settings_sync.py::test_save_purges_out_of_scope_and_masks_citations",
+        "test_settings_sync.py::test_fixed_excludes_not_editable",
+        "test_sync_status.py::test_status_fields",
+        "test_sync_status.py::test_apply_held_deletions"
+      ],
+      "e2e": [
+        "sync.spec.ts > 범위를 줄이면 삭제될 문서 수를 확인받는다",
+        "sync.spec.ts > 고정 제외는 편집할 수 없다",
+        "sync.spec.ts > 실행 중이면 지금 동기화 대신 진행 상태가 보인다",
+        "sync.spec.ts > 지금 동기화를 누르면 60초 동안 비활성화된다",
+        "sync.spec.ts > 30초 안에 실행이 없으면 CLI 안내가 보인다",
+        "sync.spec.ts > 보류된 삭제 판정을 적용할 수 있다"
+      ],
+      "log_events": ["settings.sync.previewed", "settings.sync.updated", "sync.held_deletions.applied"],
+      "extra_checks": []
+    },
+    {
+      "id": "T14",
+      "title": "데이터 수명주기: 30일 삭제, 백업, 백업 내려받기",
+      "depends": ["T07", "T08", "T12"],
+      "pytest": [
+        "test_retention.py::test_purges_after_retention_days",
+        "test_retention.py::test_retention_purge_keeps_citations",
+        "test_backup.py::test_backup_pipeline_commands",
+        "test_backup.py::test_keeps_last_three_on_vm",
+        "test_backup.py::test_backup_api_lists_sha256",
+        "test_backup.py::test_backup_download_blocks_path_traversal",
+        "test_backup_download.py::test_downloads_missing_and_verifies_hash",
+        "test_backup_download.py::test_keeps_seven_newest"
+      ],
+      "e2e": [],
+      "log_events": [],
+      "extra_checks": []
+    },
+    {
+      "id": "T15",
+      "title": "평가 CLI와 평가 화면",
+      "depends": ["T10", "T11"],
+      "pytest": [
+        "test_metrics.py::test_recall_and_mrr_with_location_overlap",
+        "test_metrics.py::test_not_found_accuracy",
+        "test_metrics.py::test_answer_score_levels",
+        "test_metrics.py::test_missing_label_path_excluded_with_warning",
+        "test_cli.py::test_run_with_fake_providers_saves_run",
+        "test_cli.py::test_compare_runs_shows_deltas"
+      ],
+      "e2e": [
+        "eval.spec.ts > 평가 실행 목록과 지표가 보인다",
+        "eval.spec.ts > 이전 실행 대비 증감이 보인다",
+        "eval.spec.ts > 싫어요 피드백에 실패 유형을 붙일 수 있다"
+      ],
+      "log_events": ["feedback.reviewed"],
+      "extra_checks": []
+    },
+    {
+      "id": "T16",
+      "title": "첫 실행 체크리스트, 상태 점검, 전역 배너",
+      "depends": ["T11"],
+      "pytest": [
+        "test_health.py::test_health_reports_worker_provider_disk",
+        "test_setup_status.py::test_checklist_progress"
+      ],
+      "e2e": [
+        "setup.spec.ts > 문서가 없으면 첫 실행 체크리스트가 보인다",
+        "setup.spec.ts > Provider 인증 오류가 나면 전역 배너가 보인다"
+      ],
+      "log_events": ["setup.status.checked", "health.degraded"],
+      "extra_checks": []
+    },
+    {
+      "id": "T17",
+      "title": "배포 구성: Compose, Nginx, 이미지",
+      "depends": ["T16"],
+      "pytest": [
+        "test_deploy_config.py::test_compose_services_limits_and_order",
+        "test_deploy_config.py::test_nginx_csp_sse_and_upload_limit",
+        "test_deploy_config.py::test_env_example_covers_settings"
+      ],
+      "e2e": [],
+      "log_events": [],
+      "extra_checks": [
+        "docker compose -f deploy/compose.yaml config -q",
+        "docker compose -f deploy/compose.yaml build"
+      ]
+    }
+  ]
+}

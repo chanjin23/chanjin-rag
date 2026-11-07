@@ -14,6 +14,9 @@ web/e2e/.logs/
 web/e2e/.results/
 web/e2e/.report/
 
+# 루프 실행 상태와 로그 (scripts/loop/loop.py)
+.loop/
+
 # 비밀값과 로컬 데이터
 .env
 *.dump

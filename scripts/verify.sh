@@ -8,11 +8,19 @@ cd "$ROOT"
 
 step() { printf '\n==> %s\n' "$1"; }
 
+# 루프 실행기(scripts/loop/loop.py)가 LOOP_REPORT_DIR을 주면 테스트 결과를 파일로도 남긴다.
+# (pytest → pytest.xml, Playwright → e2e.json) 필수 테스트가 실제로 통과했는지 이름으로 확인하는 데 쓴다.
+PYTEST_REPORT=()
+if [[ -n "${LOOP_REPORT_DIR:-}" ]]; then
+  mkdir -p "$LOOP_REPORT_DIR"
+  PYTEST_REPORT=(--junitxml "$LOOP_REPORT_DIR/pytest.xml")
+fi
+
 step "1/5 Python 의존성 동기화"
 uv sync --all-packages --quiet
 
 step "2/5 백엔드 단위 테스트 (pytest)"
-uv run pytest -q
+uv run pytest -q "${PYTEST_REPORT[@]}"
 
 step "3/5 Python 린트·포맷·타입 (ruff, mypy)"
 uv run ruff check .

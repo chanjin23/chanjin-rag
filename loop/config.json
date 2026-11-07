@@ -1,0 +1,26 @@
+{
+  "branch": "loop/mvp",
+  "worktree": "../chanjin-rag-loop",
+  "implement_model": "opus",
+  "grader_model": "opus",
+  "pass_score": 85,
+  "min_item_ratio": 0.5,
+  "max_attempts": 5,
+  "task_timeout_min": 90,
+  "reserve_min": 15,
+  "verify_timeout_min": 30,
+  "grade_timeout_min": 20,
+  "fresh_session_from_attempt": 4,
+  "usage_limit_fallback_wait_min": 30,
+  "usage_limit_max_wait_min": 360,
+  "transient_error_wait_min": 5,
+  "sample_docs_dir": "C:\\Chanjin\\dev\\obsidian",
+  "e2e_ports": [8001, 5174],
+  "rubric_items": {
+    "requirements": 30,
+    "edge_cases": 20,
+    "tests": 20,
+    "code_quality": 15,
+    "observability_ux": 15
+  }
+}
