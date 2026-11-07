@@ -414,12 +414,16 @@ def step_implement(
     run_dir: Path,
     budget_s: float,
     resume: bool,
+    state: dict[str, Any],
 ) -> tuple[str, float]:
     """구현 세션을 돌린다. (결과 요약, 실제 사용 시간)을 돌려준다. 한도 대기 시간은 제외.
 
     - 첫 시도와 `fresh_session_from_attempt` 이후: 새 세션 + implement.md
     - 그 사이 재시도: 같은 세션 이어가기 + fix.md(피드백)
     - 루프 자체가 중간에 끊겼다가 다시 시작(resume=True): 같은 세션 + resume.md
+
+    새 세션 ID는 세션을 시작하기 전에 state.json에 저장한다. 루프 프로세스가 구현 도중에
+    죽어도 다시 실행했을 때 같은 세션을 이어갈 수 있게 하기 위해서다.
     """
     values = prompt_values(task, cfg, attempt, feedback)
     common = ["--dangerously-skip-permissions", "--model", cfg["implement_model"]]
@@ -433,6 +437,7 @@ def step_implement(
     else:
         args = [*common, "--resume", ts["session_id"]]
         prompt = load_prompt("fix.md", values)
+    write_json(STATE_FILE, state)
 
     used = 0.0
     part = 0
@@ -455,6 +460,7 @@ def step_implement(
         if res.no_session:
             # 세션 기록이 없으면 새 세션으로 시작한다. 진행 상황은 기억 파일에 남아 있다.
             ts["session_id"] = str(uuid.uuid4())
+            write_json(STATE_FILE, state)
             args = [*common, "--session-id", ts["session_id"]]
             prompt = load_prompt("implement.md", values)
             continue
@@ -775,7 +781,7 @@ def run_task(task: Task, state: dict[str, Any], cfg: dict[str, Any]) -> bool:
         write_json(STATE_FILE, state)
 
         result, used = step_implement(
-            task, ts, cfg, attempt, feedback, run_dir, remaining - reserve, resume
+            task, ts, cfg, attempt, feedback, run_dir, remaining - reserve, resume, state
         )
         resume = False
         ts["active_s"] += used
