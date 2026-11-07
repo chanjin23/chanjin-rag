@@ -444,7 +444,7 @@ flowchart TD
 
 - 존재하지 않는 인용 번호는 지웁니다.
 - 인용이 하나도 없는 답변은 근거 충실성 지표에서 실패로 셉니다.
-- DeepSeek은 기본으로 답 앞에 영어 추론 텍스트(`reasoning_content`)를 냅니다. 요청에 `chat_template_kwargs: {"thinking": false}`를 넣어 끄고(`LLM_THINKING=false`), 그래도 추론 텍스트가 오면 답변과 저장에서 제외합니다.
+- 추론(thinking) 모델은 답 앞에 추론 텍스트(`reasoning_content`)를 냅니다. 끄는 키가 모델마다 달라(nemotron은 `enable_thinking`, deepseek은 `thinking`) `LLM_EXTRA_BODY`(JSON)를 요청 본문에 그대로 합칩니다. 기본값은 `{"chat_template_kwargs":{"enable_thinking":false}}`입니다. 그래도 추론 텍스트가 오면 답변과 저장에서 제외합니다.
 - LLM 설정은 PRD 검토대로 `temperature` 0\~0.3, `max_tokens` 1,024\~2,048, `stream=True`로 둡니다.
 
 ### 7.2 Hybrid 검색 SQL
@@ -698,7 +698,8 @@ web/src/
 | `NVIDIA_EMBED_API_KEY` | | 필수. 임베딩 모델용 키 |
 | `NVIDIA_RERANK_API_KEY` | | `RERANK_ENABLED=true`면 필수. 재정렬 모델용 키 |
 | `NVIDIA_BASE_URL` | `https://integrate.api.nvidia.com/v1` | |
-| `LLM_MODEL` | `deepseek-ai/deepseek-v4.1-flash` | |
+| `LLM_MODEL` | `nvidia/nemotron-3.5-lightning-30b-a3b` | 13장 비교로 선정. 예비 후보 `z-ai/glm-5.3-flash` |
+| `LLM_EXTRA_BODY` | `{"chat_template_kwargs":{"enable_thinking":false}}` | 모델별 추가 요청값(JSON). 추론 끄기(7.1) |
 | `EMBED_MODEL` | `nvidia/nemotron-3.5-embed-8b` | |
 | `RERANK_MODEL`, `RERANK_URL` | Nemotron 3.5 Rerank 8B | 엔드포인트는 모델 페이지 기준으로 설정 |
 | `RERANK_ENABLED` | `true` | 평가 결과로 결정 |
@@ -706,7 +707,6 @@ web/src/
 | `EMBED_DAILY_CHUNK_LIMIT` | `0`(제한 없음) | 13장 3번 실측 후 확정(6.2) |
 | `EMBED_BATCH_SIZE` | `1` | 무료 엔드포인트는 묶음 요청에 500(13장 실측). 유료·자체 호스팅이면 32 |
 | `EMBED_DIM` | `2048` | 모델 기본 4096차원을 `dimensions`로 줄임(6.3) |
-| `LLM_THINKING` | `false` | DeepSeek 추론 텍스트 끄기(7.1) |
 | `LOCAL_DELETED_RETENTION_DAYS` | `30` | 로컬 삭제 문서 보관 기간(6.5) |
 | `MASS_DELETE_GUARD_RATIO` | `0.2` | 한 번에 이 비율을 넘는 삭제 판정은 보류(6.1) |
 | `SYNC_RUN_STALE_MINUTES` | `10` | 하트비트가 끊긴 동기화 실행을 `abandoned`로 바꾸는 시간 |
@@ -756,20 +756,34 @@ web/src/
 
 | 항목 | 결과 | 반영 |
 | --- | --- | --- |
-| 모델 ID | `deepseek-ai/deepseek-v4.1-flash`, `nvidia/nemotron-3.5-embed-8b` 모두 모델 목록에 있음 | 12.1 그대로 |
+| 모델 ID | `deepseek-ai/deepseek-v4.1-flash`, `nvidia/nemotron-3.5-embed-8b` 모두 모델 목록에 있음 | 12.1 |
 | 임베딩 차원 | 기본 4096차원, `dimensions=2048`이면 2048차원으로 줄어듦 | 6.3 ①(2048, `halfvec`) 확정 |
 | 임베딩 묶음 | 문장 1개씩은 12/12 성공, 3개 묶음은 12/12 실패(HTTP 500 `service inference failed`) | 6.2, `EMBED_BATCH_SIZE=1` |
 | 임베딩 지연 | 질문 1개 약 0.2~0.5초 | 7.4 예산(0.5초) 안 |
 | 재정렬 | `ai.api.nvidia.com/.../reranking` 정상, 관련 문장 1위, 약 0.2~1.6초 | 7.4 예산(0.8초) 근처 |
-| LLM 응답 | 한국어 답변 정상. 추론을 끄면(`thinking=false`) 추론 텍스트 없음 | 7.1 답변 후처리 |
-| **LLM 지연** | **응답 시작까지 대기 66~81초, 첫 답변 글자 79~94초, 전체 86~99초**(3회) | **PRD 7장 목표(첫 토큰 3초, p95 8초)와 큰 차이. 시간대별 재측정과 모델 대안 검토 필요(PRD 9장 첫 번째 리스크)** |
+| LLM 응답(deepseek) | 한국어 답변 정상. 추론을 끄면(`thinking=false`) 추론 텍스트 없음 | 7.1 답변 후처리 |
+| LLM 지연(deepseek) | 응답 시작까지 대기 66~81초, 첫 답변 글자 79~94초, 전체 86~99초(3회). PRD 7장 목표(첫 토큰 3초, p95 8초)와 큰 차이 | 아래 비교 후 모델 변경 |
 | 인증 오류 | 틀린 키에 401이 아니라 403 `Authorization failed` | T03 오류 변환 |
+| 키 범위 | LLM 키로 카탈로그의 다른 LLM도 호출됨 | 모델을 바꿔도 키 재발급 불필요 |
+
+**LLM 비교 (2026-11-07, 같은 RAG 프롬프트: 자료 3개 + 인용 번호 + 한국어, 질문 3개 중 1개는 답 없음)**
+
+| 모델 | 첫 답변 글자 | 결과 |
+| --- | --- | --- |
+| **`nvidia/nemotron-3.5-lightning-30b-a3b`(`enable_thinking=false`)** | **0.4~0.5초** | 인용 정확, 답 없는 질문에 "찾지 못했습니다", 추론 텍스트 없음, 답이 짧음 → **선정** |
+| `z-ai/glm-5.3-flash` | 1.1~9.1초(중앙값 2.0) | 인용 정확, 추론 끄기 옵션이 적용되지 않음, 답이 조금 더 자세함 → 예비 후보 |
+| `mistralai/mistral-large-4-1t-a52b` | 15초 | 추론 때문에 느림 |
+| `deepseek-ai/deepseek-v4.1-flash`, `minimaxai/minimax-m3.1-flash` | 60~70초 | 무료 서버 대기열 |
+| `google/gemma-4-31b-it`, `openai/gpt-oss-20b` | 180초 초과 | 시간 초과 |
+| `google/gemma-3-12b-it`, `nvidia/nemotron-3-super-120b-a12b`, `moonshotai/kimi-k2.6` | - | 404(목록에만 있고 호출 불가) |
+
+긴 문서에서의 답변 품질은 평가셋(PRD 8장)으로 다시 확인하고, 부족하면 예비 후보와 비교합니다.
 
 | 순서 | 확인 항목 | 통과 기준 | 실패 시 |
 | --- | --- | --- | --- |
 | 1 | ParadeDB 이미지의 arm64 동작, pg\_search와 pgvector 동시 사용, 공백 토크나이저 | Oracle Linux 9 VM에서 BM25 + 벡터 RRF 쿼리 실행 성공 | 공식 PostgreSQL + pgvector 이미지로 바꾸고 BM25는 애플리케이션 내 색인(bm25s) |
 | 2 | 임베딩 실제 차원, 한 요청당 최대 입력 수, `modality` 값 | 차원 확인 후 6.3 표대로 컬럼 타입 확정 | 6.3 ②, 또는 색인 없는 전수 비교 |
-| 3 | NVIDIA API 지연, 429 동작과 응답 헤더, 재정렬 엔드포인트, deepseek의 추론 텍스트 출력 여부 | 7.4 예산 안 | 7.4의 줄이는 순서 적용 |
+| 3 | NVIDIA API 지연, 429 동작과 응답 헤더, 재정렬 엔드포인트, LLM의 추론 텍스트 출력 여부 | 7.4 예산 안 | 7.4의 줄이는 순서 적용 |
 | 4 | 내 HWP/HWPX 파일 10개 이상 파싱 품질 | 본문과 표 텍스트 누락 없음 | 다른 HWP 파서 비교, 실패 사유 기록 후 후속 과제로 |
 | 5 | OCI 프리 티어 유휴 인스턴스 회수 조건 | 이 플랫폼의 평소 부하로 회수 조건에 걸리지 않음 | 계정 유형 변경 검토, 백업 주기 확인 |
 | 6 | `tailscale serve` HTTPS, Chrome·Edge의 `chanjin-sync://` 실행(`run`, `reveal`) | 웹 버튼으로 Agent 실행, "폴더에서 보기"로 탐색기 선택 표시, Secure 쿠키 동작 | 웹 버튼은 안내만 표시하고 CLI 사용, "폴더에서 보기"는 경로 복사로 대체 |
@@ -789,6 +803,6 @@ web/src/
 **평가 CLI(`rag-eval`) 규칙**
 
 - **Recall@5, MRR:** 정답 근거를 `(경로, 위치)` 겹침으로 판정합니다.
-- **근거 충실성, 답변 정확도:** LLM-as-judge로 판정합니다. 판정 모델은 답변 모델(deepseek)과 다른 계열의 NVIDIA 카탈로그 모델로 정하고, 판정 모델 이름을 `eval_runs.config`에 기록합니다.
+- **근거 충실성, 답변 정확도:** LLM-as-judge로 판정합니다. 판정 모델은 답변 모델(nemotron)과 다른 계열의 NVIDIA 카탈로그 모델로 정하고, 판정 모델 이름을 `eval_runs.config`에 기록합니다.
 - **결과 저장:** `eval_runs`와 `eval_results`에 저장하고, `/eval` 화면과 CLI에서 이전 실행과 비교합니다.
 - **임베딩 한도:** 평가 실행 중의 질문 임베딩은 한도에 세지 않습니다.

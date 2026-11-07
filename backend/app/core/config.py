@@ -1,7 +1,7 @@
 """애플리케이션 설정. 값은 환경 변수와 `.env`에서 읽는다 (TRD 12.1)."""
 
 from functools import lru_cache
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -27,7 +27,9 @@ class Settings(BaseSettings):
     nvidia_embed_api_key: SecretStr | None = None
     nvidia_rerank_api_key: SecretStr | None = None
     nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
-    llm_model: str = "deepseek-ai/deepseek-v4.1-flash"
+    llm_model: str = "nvidia/nemotron-3.5-lightning-30b-a3b"
+    # 모델별 추가 요청값(.env에는 JSON 한 줄). 추론을 끄는 키가 모델마다 달라 값 그대로 보낸다.
+    llm_extra_body: dict[str, Any] = {"chat_template_kwargs": {"enable_thinking": False}}
     embed_model: str = "nvidia/nemotron-3.5-embed-8b"
     rerank_model: str = "nvidia/nemotron-3.5-rerank-8b"
     rerank_url: str | None = None

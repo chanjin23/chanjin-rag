@@ -48,7 +48,7 @@ MVP는 "내 문서에 대한 질문에 출처와 함께 답한다"는 한 가지
 | 서버 데이터 삭제 | 삭제 원인에 따라 다르게 처리 | 루트 해제나 제외 패턴 추가로 범위에서 빠진 문서는 설정을 저장할 때 바로 영구 삭제합니다(저장 전 삭제될 문서 수를 확인). 로컬 삭제 문서는 30일 뒤 자동 삭제하고, 그 전에 수동으로 영구 삭제할 수 있습니다. 한 번의 동기화에서 20%를 넘는 문서가 삭제로 판정되면 스캔 오류로 보고 판정을 보류합니다. 백업에는 최대 7일, 이미 NVIDIA로 보낸 텍스트는 되돌릴 수 없음을 화면에 알립니다 |
 | 원본 파일 열기 | 출처 패널의 "폴더에서 보기"로 탐색기에서 파일 위치만 보여줌 | 브라우저는 로컬 파일을 열 수 없으므로 Sync Agent의 URL 프로토콜을 씁니다. 파일을 바로 실행하지는 않습니다(매크로 등 부작용 방지). Windows가 아닌 기기에서는 경로 복사만 제공합니다 |
 | 임베딩 한도 | 하루 최대 100개 파일(파일 크기와 무관), 최근 수정순 처리, 매일 자정(한국 시간)에 초기화. BM25 색인은 한도 없이 먼저 | 초과분은 대기열에 남겨 다음 날 처리하고, 그동안에도 키워드 검색은 됩니다. 1,000개를 처음 색인하려면 최소 10일이 걸립니다. 같은 파일 버전은 재시도해도 한 번만 세고, 내용이 바뀌지 않은 청크는 기존 임베딩을 재사용해 한도를 쓰지 않습니다. 큰 파일로 API 한도를 넘지 않도록 내부에 하루 청크 상한을 두며, 값은 구축 초기 API 실측 후 정합니다 |
-| 모델 | NVIDIA API Catalog 무료 API. LLM은 deepseek-ai/deepseek-v4.1-flash(OpenAI 호환 API), 임베딩은 Nemotron 3.5 Embed 8B(nvidia/nemotron-3.5-embed-8b, 문서는 input\_type=passage, 질문은 query), 재정렬은 Nemotron 3.5 Rerank 8B(모두 Free Endpoint) | 청크와 질문 텍스트가 외부로 나갑니다. 임베딩은 아래 일일 한도로 제한합니다 |
+| 모델 | NVIDIA API Catalog 무료 API. LLM은 nvidia/nemotron-3.5-lightning-30b-a3b(OpenAI 호환 API, 추론 끔. 처음 정한 deepseek-v4.1-flash는 무료 서버 대기열로 첫 응답까지 60초 이상 걸려 2026-11-07 비교 후 변경), 임베딩은 Nemotron 3.5 Embed 8B(nvidia/nemotron-3.5-embed-8b, 문서는 input\_type=passage, 질문은 query), 재정렬은 Nemotron 3.5 Rerank 8B(모두 Free Endpoint) | 청크와 질문 텍스트가 외부로 나갑니다. 임베딩은 아래 일일 한도로 제한합니다 |
 | 문서 형식 | PDF, TXT, MD, DOCX, HWP/HWPX, XLSX, PPTX | OCR은 후속 후보입니다 |
 | 규모 | 지정 폴더 하위 약 1,000개 이하(수 GB 이하) | VM 1대와 PostgreSQL 1개로 충분합니다 |
 | UI | React Web UI | FastAPI 백엔드와 API로 통신하며, 채팅, 출처 보기, 동기화 상태 화면을 제공합니다. 로그인은 세션 방식이고, 답변은 SSE로 스트리밍합니다 |
@@ -83,7 +83,7 @@ flowchart TB
     subgraph NVIDIA["NVIDIA API Catalog (무료 티어) · 외부 전송: 청크·질문 텍스트"]
         EMBED["임베딩 모델<br/>Nemotron 3.5 Embed 8B"]
         RERANK["Reranker (선택)<br/>Nemotron 3.5 Rerank 8B"]
-        LLM["LLM<br/>deepseek-v4.1-flash"]
+        LLM["LLM<br/>Nemotron 3.5 Lightning"]
     end
 
     AGENT -- "변경 파일 전송 (VPN)" --> API

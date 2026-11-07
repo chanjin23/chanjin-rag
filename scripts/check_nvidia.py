@@ -3,7 +3,7 @@
 실행: 저장소 루트에서 `uv run python scripts/check_nvidia.py`
   --only llm|embed|rerank   하나만 확인
   --runs N                  임베딩·재정렬 지연 시간을 N번 재서 중앙값(기본 3)
-  --llm-runs N              LLM 반복 횟수(기본 1, 무료 서버 대기열 때문에 1회에 1~2분)
+  --llm-runs N              LLM 반복 횟수(기본 1)
   --out PATH                결과를 JSON으로 저장
 
 설정은 환경 변수 → 저장소 루트 `.env` → `backend/.env` 순서로 읽는다.
@@ -31,12 +31,13 @@ import httpx
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULTS = {
     "NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1",
-    "LLM_MODEL": "deepseek-ai/deepseek-v4.1-flash",
+    "LLM_MODEL": "nvidia/nemotron-3.5-lightning-30b-a3b",
     "EMBED_MODEL": "nvidia/nemotron-3.5-embed-8b",
     "EMBED_DIM": "2048",
     "RERANK_MODEL": "nvidia/nemotron-3.5-rerank-8b",
     "RERANK_URL": "https://ai.api.nvidia.com/v1/retrieval/nvidia/nemotron-3.5-rerank-8b/reranking",
-    "LLM_THINKING": "false",
+    # 모델별 추가 요청값(JSON). 추론을 끄는 키가 모델마다 다르다(.env.example 참고)
+    "LLM_EXTRA_BODY": '{"chat_template_kwargs":{"enable_thinking":false}}',
 }
 # 모델마다 발급받은 키가 다르므로 키 이름도 모델별로 둔다(.env.example 참고)
 KEY_VARS = {
@@ -139,8 +140,8 @@ def check_models(client: httpx.Client, env: dict[str, str]) -> Check:
     found = {name: env[name] in ids for name in ("LLM_MODEL", "EMBED_MODEL")}
     c.details = {"models_listed": len(ids), "found": found}
     if not found["LLM_MODEL"]:
-        similar = sorted(i for i in ids if i and "deepseek" in i.lower())
-        c.details["deepseek_models"] = similar
+        family = env["LLM_MODEL"].split("/")[0]
+        c.details["same_vendor_models"] = sorted(i for i in ids if i and i.startswith(family))
     c.ok = all(found.values())
     c.summary = ", ".join(f"{env[k]} {'있음' if v else '없음'}" for k, v in found.items())
     c.summary += " (인증 없이 보이는 목록이라 키 검증은 아래 항목에서 함)"
@@ -151,7 +152,7 @@ def check_llm(client: httpx.Client, env: dict[str, str], runs: int) -> Check:
     """스트리밍 한 번으로 첫 글자 시간, 전체 시간, 추론 텍스트 여부를 함께 잰다(TRD 7.4).
 
     무료 엔드포인트는 대기열 때문에 응답 시작까지 1분 넘게 걸리기도 해서 기본 1회만 잰다.
-    DeepSeek 계열은 답 앞에 추론 텍스트를 내므로 `LLM_THINKING=false`(기본)면 추론을 끈다.
+    `LLM_EXTRA_BODY`(JSON)를 요청 본문에 그대로 합친다. 기본값은 nemotron의 추론 끄기다.
     """
     c = Check("LLM")
     url = f"{env['NVIDIA_BASE_URL']}/chat/completions"
@@ -165,9 +166,13 @@ def check_llm(client: httpx.Client, env: dict[str, str], runs: int) -> Check:
         "max_tokens": 256,
         "stream": True,
     }
-    thinking = env.get("LLM_THINKING", "false").lower() == "true"
-    if not thinking:
-        body["chat_template_kwargs"] = {"thinking": False}
+    extra = env.get("LLM_EXTRA_BODY", "").strip()
+    if extra:
+        try:
+            body.update(json.loads(extra))
+        except json.JSONDecodeError as e:
+            c.error = f"LLM_EXTRA_BODY가 올바른 JSON이 아닙니다: {e}"
+            return c
 
     header_s: list[float] = []
     first_s: list[float] = []
@@ -175,7 +180,7 @@ def check_llm(client: httpx.Client, env: dict[str, str], runs: int) -> Check:
     content = ""
     reasoning = ""
     for i in range(runs):
-        say(f"  LLM 요청 {i + 1}/{runs} (무료 서버 대기열 때문에 1~2분 걸릴 수 있습니다)")
+        say(f"  LLM 요청 {i + 1}/{runs} (모델 대기열이 길면 1분 넘게 걸리기도 합니다)")
         start = time.perf_counter()
         first: float | None = None
         content = reasoning = ""
@@ -201,7 +206,7 @@ def check_llm(client: httpx.Client, env: dict[str, str], runs: int) -> Check:
     c.ok = bool(content.strip())
     c.details = {
         "answer_preview": content.strip()[:150],
-        "thinking_requested": thinking,
+        "extra_body": extra or "(없음)",
         "reasoning_text_received": bool(reasoning) or think_tag,
         "queue_wait_s_median": round(statistics.median(header_s), 1),
         "first_answer_char_s_median": round(statistics.median(first_s), 1),
