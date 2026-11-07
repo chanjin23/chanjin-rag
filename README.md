@@ -38,4 +38,8 @@ corepack pnpm dev
 bash scripts/verify.sh   # pytest → ruff·mypy → 웹 빌드 → E2E 전체 (Git Bash)
 ```
 
+- Docker가 필요합니다. `verify.sh`가 테스트 DB(ParadeDB, `127.0.0.1:5433`, 데이터는 tmpfs)를 `deploy/compose.test.yaml`로 띄우고, 다음 실행을 위해 내리지 않습니다. 내리려면 `docker compose -f deploy/compose.test.yaml down`.
+- pytest와 E2E는 `APP_ENV=test`, `PROVIDER=fake`로 실행되어 `.env`의 실제 키를 읽지 않고, 모델 호출은 결정적인 Fake Provider가 대신합니다.
+- `SAMPLE_DOCS_DIRS`(실제 문서 폴더, `;`로 구분)를 주면 `pytest -m samples` 단계가 추가로 돕니다.
+
 E2E만 돌릴 때는 `cd web && corepack pnpm e2e`를 실행합니다. 백엔드(:8001)와 웹(:5174)을 직접 띄우고, 설치된 Chrome으로 질문을 입력합니다. 그런 다음 화면 응답과 백엔드 로그(`web/e2e/.logs/backend.log`)를 확인합니다. 화면을 보면서 돌리려면 `pnpm e2e:headed`를, 실패 리포트는 `pnpm e2e:report`를 씁니다.

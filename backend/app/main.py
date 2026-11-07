@@ -33,7 +33,12 @@ def create_app() -> FastAPI:
         )
         return response
 
-    get_logger("app").info("app.started", env=settings.app_env)
+    get_logger("app").info(
+        "app.started",
+        env=settings.app_env,
+        provider=settings.provider,
+        log_query_text=settings.log_query_text,
+    )
     return app
 
 

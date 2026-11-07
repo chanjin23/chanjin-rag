@@ -1,19 +1,38 @@
-"""애플리케이션 설정. 값은 환경 변수와 `.env`에서 읽는다 (TRD 12.1)."""
+"""애플리케이션 설정. 값은 환경 변수와 저장소 루트의 `.env`에서 읽는다 (TRD 12.1).
 
+- `.env`는 실행 위치와 상관없이 **저장소 루트의 `.env` 하나**만 읽는다.
+  (`backend/`에서 uvicorn을 띄워도 루트 `.env`를 읽는다.)
+- 환경 변수가 `.env`보다 우선한다.
+- `APP_ENV=test`가 프로세스 환경 변수로 주어지면 `.env`를 읽지 않는다.
+  pytest(`backend/tests/conftest.py`)와 E2E(`web/playwright.config.ts`)가 이렇게 실행해,
+  실제 API 키가 테스트에 섞이지 않게 한다.
+"""
+
+import os
+from collections.abc import Mapping
 from functools import lru_cache
+from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import SecretStr
+from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# backend/app/core/config.py → 저장소 루트
+REPO_ROOT = Path(__file__).resolve().parents[3]
+ENV_FILE = REPO_ROOT / ".env"
+
+AppEnv = Literal["dev", "prod", "test"]
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(env_file=ENV_FILE, env_file_encoding="utf-8", extra="ignore")
 
-    app_env: Literal["dev", "prod"] = "dev"
+    app_env: AppEnv = "dev"
     log_level: str = "INFO"
-    log_format: Literal["console", "json"] | None = None  # 없으면 dev=console, prod=json
+    log_format: Literal["console", "json"] | None = None  # 없으면 prod=json, 그 밖에는 console
     log_file: str | None = None  # 주면 stdout과 함께 이 파일에도 기록 (E2E에서 사용)
+    # 앱 로그에 질문 원문을 남길지(TRD 11장). 운영은 false. 개발·E2E에서만 true로 쓴다.
+    log_query_text: bool = False
 
     @property
     def log_json(self) -> bool:
@@ -21,8 +40,10 @@ class Settings(BaseSettings):
             return self.log_format == "json"
         return self.app_env == "prod"
 
-    # 모델 (NVIDIA API Catalog, OpenAI 호환)
-    # 모델마다 발급받은 키가 다르다 (TRD 12.1)
+    # 모델 Provider. 테스트와 E2E는 항상 fake(결정적인 가짜 구현, 외부 호출 없음)
+    provider: Literal["fake", "nvidia"] = "nvidia"
+
+    # 모델 (NVIDIA API Catalog, OpenAI 호환). 모델마다 발급받은 키가 다르다.
     nvidia_llm_api_key: SecretStr | None = None
     nvidia_embed_api_key: SecretStr | None = None
     nvidia_rerank_api_key: SecretStr | None = None
@@ -31,18 +52,48 @@ class Settings(BaseSettings):
     # 모델별 추가 요청값(.env에는 JSON 한 줄). 추론을 끄는 키가 모델마다 달라 값 그대로 보낸다.
     llm_extra_body: dict[str, Any] = {"chat_template_kwargs": {"enable_thinking": False}}
     embed_model: str = "nvidia/nemotron-3.5-embed-8b"
+    # 모델 기본 4096차원은 halfvec HNSW 한도(4000)를 넘어서 `dimensions`로 줄인다(TRD 6.3)
+    embed_dim: int = 2048
     rerank_model: str = "nvidia/nemotron-3.5-rerank-8b"
     rerank_url: str | None = None
     rerank_enabled: bool = True
 
     # 수집
     embed_daily_file_limit: int = 100
-    embed_batch_size: int = 32
+    embed_daily_chunk_limit: int = 0  # 0이면 제한 없음(TRD 6.2)
+    # 무료 엔드포인트는 묶음 요청에 500을 돌려줘서 1개씩 보낸다(TRD 13장 실측)
+    embed_batch_size: int = 1
+    local_deleted_retention_days: int = 30
+    mass_delete_guard_ratio: float = 0.2
+    sync_run_stale_minutes: int = 10
 
-    # DB (구조만 잡아 둠, 아직 연결하지 않음)
+    # DB. 테스트·E2E는 TEST_DATABASE_URL(5433의 테스트 DB)을 DATABASE_URL로 넘긴다
     database_url: str = "postgresql+psycopg://rag:rag@localhost:5432/rag"
+
+    # 운영
+    tz: str = "Asia/Seoul"
+    backup_age_recipient: str | None = None
+    backup_keep_on_vm: int = 3
+
+    @model_validator(mode="after")
+    def _guard_test_env(self) -> "Settings":
+        # 테스트·E2E에서는 실제 모델을 부르지 않는다. 셸 환경 변수에 키가 있어도 버린다.
+        if self.app_env == "test":
+            if self.provider != "fake":
+                raise ValueError("APP_ENV=test에서는 PROVIDER=fake만 쓸 수 있습니다")
+            self.nvidia_llm_api_key = None
+            self.nvidia_embed_api_key = None
+            self.nvidia_rerank_api_key = None
+        return self
+
+
+def env_file_for(environ: Mapping[str, str]) -> Path | None:
+    """읽을 `.env` 경로. 프로세스 환경 변수가 `APP_ENV=test`면 `.env`를 읽지 않는다."""
+    if environ.get("APP_ENV", "").strip().lower() == "test":
+        return None
+    return ENV_FILE
 
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    return Settings(_env_file=env_file_for(os.environ))  # type: ignore[call-arg]

@@ -16,6 +16,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
+from app.core.config import get_settings
 from app.core.logging import get_logger
 
 router = APIRouter(tags=["chat"])
@@ -41,12 +42,15 @@ def _event(name: str, data: object) -> dict[str, str]:
 
 @router.post("/conversations/{conversation_id}/messages")
 async def post_message(conversation_id: str, body: MessageIn) -> EventSourceResponse:
+    # 질문 원문은 기본적으로 앱 로그에 남기지 않고 길이만 남긴다(TRD 11장).
+    # 개발·E2E에서 LOG_QUERY_TEXT=true일 때만 원문을 `text`로 함께 기록한다.
+    extra: dict[str, object] = {"text": body.text} if get_settings().log_query_text else {}
     log.info(
         "chat.message.received",
         conversation_id=conversation_id,
-        text=body.text,
         length=len(body.text),
         filters=body.filters.model_dump(exclude_none=True) if body.filters else None,
+        **extra,
     )
     started = time.perf_counter()
 

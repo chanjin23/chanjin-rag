@@ -1,0 +1,33 @@
+# 테스트 전용 ParadeDB (TRD 3.2, 14장). `scripts/verify.sh`가 띄우고 pytest·E2E가 함께 쓴다.
+# 실행: docker compose -f deploy/compose.test.yaml up -d --wait
+# - 포트 5433: 개발·운영 DB(5432)와 겹치지 않게 한다.
+# - 데이터는 tmpfs: 컨테이너를 내리면 모두 사라진다(테스트 데이터만 둔다).
+name: chanjin-rag-test
+
+services:
+  db:
+    image: paradedb/paradedb:0.26.5-pg17
+    environment:
+      POSTGRES_USER: rag
+      POSTGRES_PASSWORD: rag
+      POSTGRES_DB: rag_test
+      TZ: Asia/Seoul
+    ports:
+      - "127.0.0.1:5433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    volumes:
+      # 초기화 폴더의 하위 폴더는 무시되므로 파일 단위로 넣는다(이미지 자체 초기화 뒤에 실행)
+      - ./test-db-init/01_extensions.sql:/docker-entrypoint-initdb.d/zz_chanjin_extensions.sql:ro
+    healthcheck:
+      # 초기화 SQL까지 끝나야 확장이 보이므로 확장 존재 여부로 판단한다.
+      # 초기화 중 임시 서버는 TCP를 열지 않으므로 -h 127.0.0.1로 최종 서버만 확인한다.
+      test:
+        - CMD-SHELL
+        - >-
+          psql -h 127.0.0.1 -U rag -d rag_test -tAc
+          "select count(*) from pg_extension where extname in ('pg_search','vector')"
+          | grep -qx 2
+      interval: 2s
+      timeout: 5s
+      retries: 60

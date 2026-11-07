@@ -43,3 +43,9 @@ ignore_missing_imports = true
 testpaths = ["backend/tests", "agent/tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+# 실제 문서 폴더(SAMPLE_DOCS_DIRS)를 읽는 테스트는 기본 실행에서 뺀다.
+# verify.sh가 SAMPLE_DOCS_DIRS가 있을 때만 `pytest -m samples`로 따로 실행한다(뒤의 -m이 우선).
+addopts = ["-m", "not samples"]
+markers = [
+    "samples: SAMPLE_DOCS_DIRS의 실제 문서 폴더를 읽는 테스트(기본 실행에서 제외)",
+]

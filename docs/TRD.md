@@ -32,7 +32,7 @@ PRD에서 정한 기능을 어떤 기술로, 어떤 구조로 만들지 정한 �
 | --- | --- | --- |
 | 언어 | Python 3.12, TypeScript | 백엔드·Agent·평가는 Python, 웹은 TypeScript |
 | 패키지 | uv(workspace, lock 파일), pnpm | |
-| API 서버 | FastAPI, Uvicorn, Pydantic v2, pydantic-settings | 설정은 `.env`에서 읽습니다 |
+| API 서버 | FastAPI, Uvicorn, Pydantic v2, pydantic-settings | 설정은 환경 변수와 저장소 루트의 `.env` 하나에서 읽습니다(실행 위치와 무관) |
 | SSE | sse-starlette | 답변 스트리밍 |
 | DB | PostgreSQL 17(ParadeDB 공식 이미지), pgvector, pg\_search | 벡터, BM25, 필터를 SQL 하나로 처리 |
 | DB 접근 | SQLAlchemy 2.0(async), psycopg 3, Alembic | Hybrid 검색 SQL은 직접 작성 |
@@ -178,6 +178,8 @@ chanjin-rag/
 ├─ web/                     # Vite + React + TypeScript
 ├─ deploy/
 │  ├─ compose.yaml
+│  ├─ compose.test.yaml     # 테스트 전용 ParadeDB(5433, tmpfs). verify.sh가 띄움
+│  ├─ test-db-init/         # 테스트 DB 초기화 SQL(pg_search, vector 확장)
 │  ├─ nginx.conf
 │  ├─ postgres/             # postgresql.conf 조정값, 초기화 SQL
 │  └─ scripts/              # backup, restore, deploy
@@ -711,6 +713,9 @@ web/src/
 | `MASS_DELETE_GUARD_RATIO` | `0.2` | 한 번에 이 비율을 넘는 삭제 판정은 보류(6.1) |
 | `SYNC_RUN_STALE_MINUTES` | `10` | 하트비트가 끊긴 동기화 실행을 `abandoned`로 바꾸는 시간 |
 | `LOG_QUERY_TEXT` | `false` | 앱 로그에 질문 원문 기록 여부(개발·E2E 전용) |
+| `APP_ENV` | `dev` | `dev` \| `prod` \| `test`. 프로세스 환경 변수로 `test`를 주면 `.env`를 읽지 않고 NVIDIA 키를 비웁니다(pytest·E2E) |
+| `PROVIDER` | `nvidia` | `nvidia` \| `fake`. `fake`는 결정적인 가짜 구현(14장). `APP_ENV=test`에서는 `fake`만 허용 |
+| `DATABASE_URL` | `postgresql+psycopg://rag:rag@localhost:5432/rag` | 테스트·E2E는 `TEST_DATABASE_URL`(테스트 DB, 5433)을 씁니다 |
 | `TZ` | `Asia/Seoul` | 한도 초기화와 예약 작업 기준 |
 | `BACKUP_AGE_RECIPIENT` | | age 공개키 |
 | `BACKUP_KEEP_ON_VM` | `3` | |
@@ -794,7 +799,8 @@ web/src/
 | 수준 | 대상 | 방법 |
 | --- | --- | --- |
 | 단위 | 형식별 파서(암호 걸린 파일, 손상 파일, 빈 문서 포함), 청커, Kiwi 토큰화, RRF 합산, 인용 후처리, manifest 판정(이동, 복사, 읽지 못한 폴더, 대량 삭제 보호), 제외 패턴(고정 제외가 하위 같은 이름 폴더를 빼지 않는지), 요약 대상 판정 | pytest, `backend/tests/fixtures`에 형식별 샘플 파일(HWP 포함) |
-| 통합 | Hybrid SQL, 작업 큐와 일일 한도(버전당 1회 차감, 청크 임베딩 재사용, 청크 상한), 처리 중 새 버전 도착 시 결과 폐기, 청크 교체 트랜잭션, 영구 삭제와 인용 가림 | Docker의 ParadeDB 테스트 DB에 pytest 실행 |
+| 실제 문서 | 실제 문서 폴더에서 파서·청커가 깨지지 않는지(개수와 비율만 확인) | pytest `samples` 마커. 기본 실행에서 빼고, `SAMPLE_DOCS_DIRS`(폴더 여러 개, Windows는 `;`로 구분)가 있으면 `verify.sh`가 `pytest -m samples`를 따로 실행. 내용·파일명은 저장소와 로그에 남기지 않음 |
+| 통합 | Hybrid SQL, 작업 큐와 일일 한도(버전당 1회 차감, 청크 임베딩 재사용, 청크 상한), 처리 중 새 버전 도착 시 결과 폐기, 청크 교체 트랜잭션, 영구 삭제와 인용 가림 | Docker의 ParadeDB 테스트 DB(`deploy/compose.test.yaml`, 포트 5433, tmpfs)에 pytest 실행. `scripts/verify.sh`가 띄우고 `TEST_DATABASE_URL`을 넘김. 테스트마다 트랜잭션 롤백 |
 | API | 인증, Sync API, SSE 이벤트 순서(일반, 찾지 못함, 요약, 오류, 409) | httpx `AsyncClient`, Provider는 Fake 구현(고정 벡터·고정 답변) |
 | Agent | 스캔, 해시 캐시, 재시도 큐, 잠긴 파일, 프로토콜 인자 검증(`run`, `reveal`의 해시 형식과 루트 밖 경로 거절) | 임시 폴더와 가짜 서버 |
 | 웹 | SSE 파서, 인용 칩, 이미지·외부 링크 차단, 동기화 버튼 흐름(실행 중, 60초 비활성화), 범위 변경 확인 창 | Vitest + MSW |
