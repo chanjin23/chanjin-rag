@@ -4,21 +4,33 @@
   NVIDIA 키도 비운다(`app.core.config`). 앱 모듈을 import하기 전에 정해야 하므로 맨 위에서 설정한다.
 - 테스트 DB: `TEST_DATABASE_URL`(기본 127.0.0.1:5433의 ParadeDB). `scripts/verify.sh`가
   `deploy/compose.test.yaml`로 띄운다. 테스트마다 트랜잭션을 열고 끝나면 롤백한다.
+- 스키마: `migrated_db` 세션 픽스처가 pytest 시작 시 Alembic으로 `base`까지 내렸다가 `head`로 올린다
+  (이전 실행·E2E가 남긴 데이터를 지우고, 현재 마이그레이션 코드와 같은 스키마로 맞춤).
+- async: psycopg의 async 모드는 Windows의 ProactorEventLoop에서 동작하지 않아 Selector 정책을 쓴다.
 - 샘플 문서: `SAMPLE_DOCS_DIRS`(os.pathsep, Windows는 `;`로 구분). `samples` 마커 테스트만 쓴다.
 """
 
+import asyncio
 import os
+import sys
 
 os.environ["APP_ENV"] = "test"
 os.environ["PROVIDER"] = "fake"
 
-from collections.abc import Iterator  # noqa: E402
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+from collections.abc import AsyncIterator, Iterator  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 import psycopg  # noqa: E402
 import pytest  # noqa: E402
+from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
+from sqlalchemy.pool import NullPool  # noqa: E402
 
 from app.core.config import get_settings  # noqa: E402
+from app.db import migrate  # noqa: E402
+from app.db.engine import create_engine  # noqa: E402
 
 DEFAULT_TEST_DATABASE_URL = "postgresql+psycopg://rag:rag@127.0.0.1:5433/rag_test"
 
@@ -60,13 +72,41 @@ def db_connection(db_url: str) -> Iterator[psycopg.Connection[tuple[object, ...]
         yield conn
 
 
+@pytest.fixture(scope="session")
+def migrated_db(db_url: str, db_connection: psycopg.Connection[tuple[object, ...]]) -> str:
+    """테스트 DB를 빈 상태에서 최신 스키마(head)로 만든다. 세션에 한 번. DB URL을 돌려준다."""
+    migrate.downgrade("base", url=db_url)
+    migrate.upgrade("head", url=db_url)
+    return db_url
+
+
 @pytest.fixture
 def db(
+    migrated_db: str,
     db_connection: psycopg.Connection[tuple[object, ...]],
 ) -> Iterator[psycopg.Connection[tuple[object, ...]]]:
-    """테스트 하나의 DB 연결. 안에서 commit해도 끝나면 모두 롤백된다."""
+    """테스트 하나의 DB 연결(psycopg, 동기). 안에서 commit해도 끝나면 모두 롤백된다."""
     with db_connection.transaction(force_rollback=True):
         yield db_connection
+
+
+@pytest.fixture
+async def session(migrated_db: str) -> AsyncIterator[AsyncSession]:
+    """테스트 하나의 SQLAlchemy async 세션. `commit()`은 savepoint가 되고 끝나면 모두 롤백된다."""
+    engine = create_engine(migrated_db, poolclass=NullPool)
+    try:
+        async with engine.connect() as conn:
+            outer = await conn.begin()
+            s = AsyncSession(
+                bind=conn, join_transaction_mode="create_savepoint", expire_on_commit=False
+            )
+            try:
+                yield s
+            finally:
+                await s.close()
+                await outer.rollback()
+    finally:
+        await engine.dispose()
 
 
 def sample_docs_dirs_from_env() -> list[Path]:

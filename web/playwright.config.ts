@@ -54,7 +54,8 @@ export default defineConfig({
   webServer: [
     {
       name: "backend",
-      command: `uv run uvicorn app.main:app --host 127.0.0.1 --port ${API_PORT}`,
+      // 테스트 DB 스키마를 최신(alembic head)으로 올린 뒤 서버를 띄운다(pytest가 먼저 돌았으면 변화 없음).
+      command: `uv run rag-backend migrate && uv run uvicorn app.main:app --host 127.0.0.1 --port ${API_PORT}`,
       cwd: "../backend",
       url: `${API_URL}/api/health`,
       env: BACKEND_ENV,

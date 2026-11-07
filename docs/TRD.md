@@ -192,6 +192,10 @@ chanjin-rag/
 
 모든 시각은 `timestamptz`로 저장하고, 화면과 일일 한도 계산은 `Asia/Seoul` 기준으로 합니다. 테이블과 핵심 컬럼만 적고, 상세 DDL은 Alembic 마이그레이션이 기준입니다.
 
+- 모델은 `backend/app/db/models.py`, 마이그레이션은 `backend/alembic/versions/`입니다. `rag-backend migrate`(= `alembic upgrade head`)로 올리고 `rag-backend downgrade <리비전>`으로 내립니다.
+- 상태·종류 값(`status`, `kind`, `type`, `role`, `reason`, `failure_code`, `failure_type`, `source`)은 PostgreSQL 네이티브 enum 대신 문자열 + CHECK 제약으로 저장합니다. 값을 추가할 때 `ALTER TYPE` 없이 제약만 바꾸면 됩니다.
+- `sync_config` 초기값(마이그레이션이 넣음): 루트 `C:\Chanjin\dev`, 기본 제외 패턴(6.1), `max_file_mb` 10.
+
 ### 5.1 수집
 
 | 테이블 | 핵심 컬럼 | 설명 |
@@ -199,8 +203,8 @@ chanjin-rag/
 | `sync_config` | `roots jsonb`, `excludes jsonb`, `max_file_mb int`(기본 10), `updated_at` | 단일 행. Agent가 실행할 때마다 받아 감. 고정 제외는 여기에 넣지 않고 코드에 둠. `max_file_mb`는 웹에서 바꾸지 않음(Nginx 업로드 상한과 함께 바꿔야 하므로) |
 | `documents` | `id`, `path`, `path_key`(NFC 정규화 후 소문자, unique), `filename`, `ext`(소문자), `size`, `mtime`, `sha256`, `status`, `failure_code`, `failure_detail`, `content_indexed bool`, `locally_deleted bool`, `deleted_at`, `needs_upload bool`, `embed_charged_sha256`, `embed_model`, `embed_dim`, `created_at`, `updated_at` | 파일 1개 = 1행. `path`는 원래 Windows 경로를 그대로 보관. `embed_charged_sha256`은 한도를 이미 차감한 버전 |
 | `sections` | `id`, `document_id`, `seq`, `location jsonb`, `heading_path text[]`, `kind`, `text` | 추출 텍스트 원본. 재청킹은 여기서 다시 하므로 재업로드가 필요 없음 |
-| `chunks` | `id`, `document_id`, `seq`, `location jsonb`, `heading_path`, `content`, `content_sha256`, `bm25_text`, `token_count`, `embedding halfvec(N)`(NULL 허용), `embed_model` | 검색 단위. `bm25_text`는 Kiwi 토큰을 공백으로 이은 문자열. `content_sha256`은 임베딩 입력(머리말 포함)의 해시로, 임베딩 재사용에 씀 |
-| `jobs` | `id`, `type`, `document_id`, `sha256`, `status`, `priority`, `attempts`, `run_after`, `locked_at`, `last_error` | `type`: `extract`, `index`, `embed`. `priority`는 파일 수정 시각. `sha256`은 작업 대상 버전으로, 끝날 때 문서의 현재 해시와 다르면 결과를 버림 |
+| `chunks` | `id`, `document_id`, `seq`, `location jsonb`, `heading_path`, `filename`, `content`, `content_sha256`, `bm25_text`, `token_count`, `embedding halfvec(N)`(NULL 허용, N=`EMBED_DIM`), `embed_model` | 검색 단위. `bm25_text`는 Kiwi 토큰을 공백으로 이은 문자열. `content_sha256`은 임베딩 입력(머리말 포함)의 해시로, 임베딩 재사용에 씀. `filename`은 `documents.filename`의 사본으로, BM25 색인이 한 테이블의 컬럼만 색인할 수 있어 둠(파일 이동 시 함께 갱신) |
+| `jobs` | `id`, `type`, `document_id`, `sha256`, `status`, `priority`, `attempts`, `run_after`, `locked_at`, `last_error` | `type`: `extract`, `index`, `embed`. `status`: `queued`, `running`, `done`(버전이 바뀌어 결과를 버린 경우 포함), `failed`(재시도 초과). `priority`는 파일 수정 시각(`timestamptz`). `sha256`은 작업 대상 버전으로, 끝날 때 문서의 현재 해시와 다르면 결과를 버림 |
 | `embed_quota` | `day date`(PK), `used int`, `chunks_used int` | 한국 시간 기준 날짜별 사용량(파일 수, 청크 수). 새 날짜 행이 생기면 자연스럽게 초기화 |
 | `sync_runs` | `id`, `source`(`schedule`·`web`·`cli`), `started_at`, `finished_at`, `heartbeat_at`, `status`(`running`·`succeeded`·`failed`·`abandoned`), `stats jsonb` | 동기화 실행 이력. 웹의 상태 화면이 사용. `stats`에 업로드 수, 지원하지 않는 형식으로 건너뛴 수, 읽지 못한 폴더, 보류된 삭제 판정을 담음 |
 
@@ -258,8 +262,9 @@ stateDiagram-v2
 | 대상 | 색인 | 비고 |
 | --- | --- | --- |
 | `chunks.embedding` | HNSW(`halfvec_cosine_ops`), `m=16`, `ef_construction=64` | 필터와 같이 쓸 때 결과가 모자라지 않게 `hnsw.iterative_scan`을 켭니다 |
-| `chunks.bm25_text` | pg\_search BM25 색인, 공백(whitespace) 토크나이저 | Kiwi가 이미 토큰화했으므로 DB에서는 공백으로만 자릅니다. 함께 `filename`, `heading_path`도 색인 |
+| `chunks.bm25_text` | pg\_search BM25 색인, 공백(whitespace) 토크나이저 | Kiwi가 이미 토큰화했으므로 DB에서는 공백으로만 자릅니다. 함께 `filename`, `heading_path`도 색인(`simple` 토크나이저: 구두점·밑줄에서 자르고 소문자화). pg\_search 0.26.5 문법: `USING bm25 (id, (bm25_text::pdb.whitespace), (filename::pdb.simple), (heading_path::pdb.simple))`, 첫 컬럼이 키(`key_field`는 0.26부터 불필요) |
 | `documents` | `path_key` unique, `sha256`, `(status)`, `(locally_deleted)` | |
+| `sections`, `chunks` | `(document_id, seq)` unique, `chunks.content_sha256` | |
 | `jobs` | `(status, type, priority DESC)` | 큐 선택용 |
 
 pg\_search의 색인 생성 문법과 토크나이저 설정은 버전마다 바뀌어 왔습니다. 구축 초기 검증(13장)에서 쓰는 이미지 버전 기준으로 확정합니다.
