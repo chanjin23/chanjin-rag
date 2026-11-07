@@ -1,0 +1,45 @@
+[project]
+name = "chanjin-rag"
+version = "0.1.0"
+description = "개인 문서 RAG 플랫폼 (uv workspace 루트)"
+requires-python = ">=3.12,<3.13"
+
+[tool.uv.workspace]
+members = ["backend", "agent", "eval"]
+
+[tool.uv.sources]
+chanjin-rag-backend = { workspace = true }
+rag-agent = { workspace = true }
+rag-eval = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "rag_agent", "rag_eval"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["backend/tests", "agent/tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
