@@ -72,6 +72,9 @@ class Settings(BaseSettings):
     embed_daily_chunk_limit: int = 0  # 0이면 제한 없음(TRD 6.2)
     # 무료 엔드포인트는 묶음 요청에 500을 돌려줘서 1개씩 보낸다(TRD 13장 실측)
     embed_batch_size: int = 1
+    # 파서 격리(TRD 3.4, 11장): 하위 프로세스 하나의 시간·메모리 상한. 메모리 0이면 상한 없음
+    parser_timeout_seconds: float = 60.0
+    parser_memory_limit_mb: int = 1024
     local_deleted_retention_days: int = 30
     mass_delete_guard_ratio: float = 0.2
     sync_run_stale_minutes: int = 10

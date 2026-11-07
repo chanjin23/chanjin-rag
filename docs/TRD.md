@@ -127,15 +127,35 @@ flowchart LR
 
 | 형식 | 라이브러리 | 위치 정보 | 비고 |
 | --- | --- | --- | --- |
-| PDF | PyMuPDF | 페이지 | 텍스트 레이어가 없는 페이지는 "스캔본 의심"으로 기록하고 건너뜁니다(OCR은 후속). AGPL이지만 배포하지 않는 개인 용도라 문제없습니다 |
-| DOCX | python-docx | 제목 계층, 표 번호 | 문단 스타일(Heading 1\~n)로 제목 계층을 만들고, 표는 행 단위로 따로 추출 |
-| XLSX | openpyxl(read-only, data\_only) | 시트, 행 범위 | 첫 비어 있지 않은 행을 헤더로 보고, 수식은 계산된 값으로 읽습니다 |
+| PDF | PyMuPDF(1.x) | 페이지 | 텍스트 레이어가 없는 페이지는 "스캔본 의심"(`scanned_page` 경고)으로 기록하고 건너뜁니다(OCR은 후속). AGPL이지만 배포하지 않는 개인 용도라 문제없습니다. 2.x는 onnxruntime 등 무거운 의존성을 끌어와 1.x로 고정합니다 |
+| DOCX | python-docx | 제목 계층, 문단 번호, 표 번호·행 | 문단 스타일(Heading 1\~n, `제목 n`, 개요 수준, Title=최상위)로 제목 계층을 만들고, 표는 행 단위로 따로 추출(첫 행을 헤더로, `헤더: 값 \| 헤더: 값`) |
+| XLSX | openpyxl(read-only, data\_only) | 시트, 행 범위 | 첫 비어 있지 않은 행을 헤더로 보고, 수식은 계산된 값으로 읽습니다. **후속(T18). 그 전에는 `unsupported_format`** |
 | PPTX | python-pptx | 슬라이드 번호 | 제목, 본문 도형, 표, 발표자 노트 순서로 추출 |
-| HWPX | zipfile + lxml | 구역, 문단 | `Contents/section*.xml`의 문단과 표를 직접 해석 |
-| HWP | pyhwp(hwp5txt 계열) | 문단(페이지 없음) | 품질 리스크가 가장 큰 형식입니다. 구축 초기에 내 파일로 비교합니다(13장) |
-| TXT, MD | charset-normalizer | 줄 범위, MD 제목 | 한국어 Windows 파일은 cp949가 많아 인코딩을 먼저 판별합니다 |
+| HWPX | zipfile + lxml | 구역, 문단 | `Contents/section*.xml`의 문단과 표를 직접 해석. **후속(T18). 그 전에는 `unsupported_format`** |
+| HWP | pyhwp(hwp5txt 계열) | 문단(페이지 없음) | 품질 리스크가 가장 큰 형식입니다. 구축 초기에 내 파일로 비교합니다(13장). **후속(T18). 그 전에는 `unsupported_format`** |
+| TXT, MD | charset-normalizer | 줄 범위, MD 제목 | 한국어 Windows 파일은 cp949가 많아 인코딩을 먼저 판별합니다(BOM → UTF-8 → charset-normalizer, EUC-KR 계열은 cp949로 읽음). MD는 ATX 제목(`#`)으로 계층을 만들고 코드 블록 안의 `#`은 무시 |
 
-파서는 `Parser` 인터페이스를 구현하고, 결과는 공통 형식인 `Section(location, heading_path, text, kind)` 목록으로 반환합니다. `kind`는 `text`, `table`, `slide` 중 하나입니다. 파서마다 타임아웃(60초)과 메모리 상한을 둡니다. 실패하면 사유 코드와 함께 문서를 `failed`로 기록합니다.
+파서는 `Parser` 인터페이스를 구현하고, 결과는 공통 형식인 `Section(location, heading_path, text, kind)` 목록으로 반환합니다(`backend/app/ingest/parsers/`). `kind`는 `text`, `table`, `slide` 중 하나입니다. 확장자 → 파서 등록표는 대소문자를 무시합니다. 파서마다 타임아웃(60초)과 메모리 상한을 둡니다. 실패하면 사유 코드와 함께 문서를 `failed`로 기록합니다.
+
+**섹션 단위와 위치(`location`)**
+
+| 형식 | 섹션 1개 | `location` 예 |
+| --- | --- | --- |
+| PDF | 페이지 | `{"page": 3}` |
+| DOCX 본문 | 문단(제목 문단은 `heading_path`로만 씀) | `{"paragraph": 12}` |
+| DOCX 표 | 데이터 행(`kind=table`, `헤더: 값 \| 헤더: 값`. 행이 1개뿐인 표는 그 행) | `{"table": 2, "row": 5}` |
+| PPTX | 슬라이드(`kind=slide`): 제목 → 본문 도형(위→아래, 왼쪽→오른쪽) → 표 → `발표자 노트:` 뒤에 노트 | `{"slide": 7}` |
+| TXT, MD | 빈 줄로 나눈 문단 | `{"lines": [10, 14]}` |
+
+섹션을 잘게 나누는 것은 청크 위치를 정확히 남기기 위해서입니다. 청킹(6.3)이 같은 `heading_path`의 연속 섹션을 이어 붙입니다.
+
+**파서 격리(실행 방식)**
+
+- Worker는 `parse_in_subprocess`로 파일마다 하위 프로세스(`python -m app.ingest.parsers._child`)를 띄웁니다. 결과는 자식의 stdout으로 JSON 한 줄을 받습니다(자식은 라이브러리 출력이 섞이지 않게 원래 stdout을 결과 전용으로만 씁니다).
+- 타임아웃(`PARSER_TIMEOUT_SECONDS`, 기본 60초)을 넘기면 자식을 죽이고 `timeout`으로 기록합니다.
+- 메모리 상한(`PARSER_MEMORY_LIMIT_MB`, 기본 1024MB)은 자식이 시작하자마자 스스로 겁니다. Linux(운영)는 `RLIMIT_AS`, Windows(개발)는 Job Object의 프로세스 메모리 상한(`JOB_OBJECT_LIMIT_PROCESS_MEMORY`, Windows 8 이상은 Job 중첩이 되어 터미널·IDE 안에서도 동작)을 씁니다. 넘으면 할당이 실패해 `memory`로 기록합니다. `RLIMIT_AS`는 가상 메모리 기준이라 실제 사용량보다 빨리 닿을 수 있어 넉넉히 둡니다. 상한을 걸지 못하면 `parse.memory_limit_unavailable` 경고 로그를 남기고 타임아웃만으로 진행합니다.
+- 자식이 결과 없이 죽으면 `MemoryError` 흔적이나 SIGKILL(OOM)이면 `memory`, 그 밖에는 `parser_error`입니다. Worker 본체는 영향을 받지 않습니다.
+- 로그: `parse.completed`(형식, 섹션 수, 글자 수, 경고 수, 스캔본 의심 페이지 수, 소요 시간), `parse.failed`(사유 코드). 파일 경로·이름과 본문은 남기지 않습니다.
 
 **실패 사유 코드(`failure_code`)**
 
@@ -146,9 +166,11 @@ flowchart LR
 | `timeout` | 파싱 60초 초과 | 재처리하거나 파일을 나눠 보세요 |
 | `memory` | 메모리 상한 초과 | 재처리하거나 파일을 나눠 보세요 |
 | `hash_mismatch` | 업로드 중 파일이 바뀜 | 다음 동기화 때 자동으로 다시 올라옵니다 |
-| `parser_error` | 그 밖의 파서 예외(`failure_detail`에 메시지) | 재처리하세요. 반복되면 파서 문제입니다 |
+| `parser_error` | 그 밖의 파서 예외(`failure_detail`에 메시지, 파일 경로는 지움) | 재처리하세요. 반복되면 파서 문제입니다 |
+| `unsupported_format` | 아직 파서가 없는 형식(HWP, HWPX, XLSX. 후속 T18). 파싱을 시도하지 않고, 파일명 청크 1개를 만들어 파일명으로는 검색되게 합니다 | 이 형식은 아직 지원하지 않습니다. 후속 버전에서 지원합니다 |
 
 - XLSX를 Excel 외 도구로 저장해 수식의 계산값이 없으면 빈 값 대신 수식 문자열을 넣고, 문서에 경고를 남깁니다.
+- 암호: PDF는 열 때 비밀번호가 필요한 경우(소유자 암호만 있는 PDF는 그대로 읽음), DOCX·PPTX는 OLE 복합 파일 안의 `EncryptedPackage`로 판별합니다. ZIP이 아니거나 내용 형식이 확장자와 다르면 `corrupted`입니다.
 - 추출 결과 텍스트가 0자(완전 스캔 PDF, 빈 문서)면 실패가 아니라 `no_text` 상태로 두고, 파일명 청크 1개만 만들어 파일명으로 검색되게 합니다.
 
 ## 4. 저장소 구조
@@ -692,7 +714,7 @@ web/src/
 | 비밀번호 | argon2id 해시, 5회 실패 시 15분 잠금 |
 | Agent 토큰 | 32바이트 난수, DB에는 해시만 저장, PC에서는 keyring에 보관, 폐기 가능(`revoked_at`) |
 | 업로드 | 경로는 `sync_config`의 루트 안이고 고정 제외에 걸리지 않는지 서버에서 다시 검증, 크기 상한(Nginx `client_max_body_size 12m`, `max_file_mb`를 바꿀 때 함께 바꿈), 확장자 화이트리스트(대소문자 무시), 해시 재검증 |
-| 파서 격리 | 파싱은 Worker의 하위 프로세스에서 타임아웃과 메모리 상한을 두고 실행. 실패해도 Worker 본체는 유지 |
+| 파서 격리 | 파싱은 Worker의 하위 프로세스에서 타임아웃(60초)과 메모리 상한(Linux `RLIMIT_AS`, Windows Job Object)을 두고 실행. 실패해도 Worker 본체는 유지(3.4) |
 | 비밀값 | `.env`(권한 600)에만 두고 Git에는 `.env.example`만 올립니다. 대상: `NVIDIA_LLM_API_KEY`, `NVIDIA_EMBED_API_KEY`, `NVIDIA_RERANK_API_KEY`, `DATABASE_URL`, `BACKUP_AGE_RECIPIENT`(공개키) |
 | 저장 데이터 | OCI 부트 볼륨 기본 암호화. 원본은 추출 직후 삭제. 백업은 age로 암호화하고 개인키는 VM에 두지 않음. 개인키는 PC와 비밀번호 관리자(또는 오프라인 매체) 두 곳에 보관 |
 | 데이터 삭제 | 범위 제외는 즉시, 로컬 삭제는 30일 뒤 영구 삭제(6.5) |
@@ -719,6 +741,8 @@ web/src/
 | `RERANK_ENABLED` | `true` | 평가 결과로 결정 |
 | `EMBED_DAILY_FILE_LIMIT` | `100` | |
 | `EMBED_DAILY_CHUNK_LIMIT` | `0`(제한 없음) | 13장 3번 실측 후 확정(6.2) |
+| `PARSER_TIMEOUT_SECONDS` | `60` | 파서 하위 프로세스 시간 상한(초, 3.4) |
+| `PARSER_MEMORY_LIMIT_MB` | `1024` | 파서 하위 프로세스 메모리 상한(MB, 0이면 없음, 3.4) |
 | `EMBED_BATCH_SIZE` | `1` | 무료 엔드포인트는 묶음 요청에 500(13장 실측). 유료·자체 호스팅이면 32 |
 | `EMBED_DIM` | `2048` | 모델 기본 4096차원을 `dimensions`로 줄임(6.3) |
 | `LOCAL_DELETED_RETENTION_DAYS` | `30` | 로컬 삭제 문서 보관 기간(6.5) |

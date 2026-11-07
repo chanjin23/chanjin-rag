@@ -30,6 +30,8 @@ class FailureCode(StrEnum):
     MEMORY = "memory"
     HASH_MISMATCH = "hash_mismatch"
     PARSER_ERROR = "parser_error"
+    # 아직 파서가 없는 형식(HWP·HWPX·XLSX, T18에서 지원). 파싱하지 않고 파일명 청크만 만든다.
+    UNSUPPORTED_FORMAT = "unsupported_format"
 
 
 class SectionKind(StrEnum):
