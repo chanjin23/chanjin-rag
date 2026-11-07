@@ -75,6 +75,9 @@ class Settings(BaseSettings):
     # 파서 격리(TRD 3.4, 11장): 하위 프로세스 하나의 시간·메모리 상한. 메모리 0이면 상한 없음
     parser_timeout_seconds: float = 60.0
     parser_memory_limit_mb: int = 1024
+    # Kiwi 사용자 사전(TRD 6.4). 없으면 저장소의 deploy/kiwi_user_dict.txt.
+    # 파일이 없으면 사전 없이 동작한다
+    kiwi_user_dict_path: str | None = None
     local_deleted_retention_days: int = 30
     mass_delete_guard_ratio: float = 0.2
     sync_run_stale_minutes: int = 10
