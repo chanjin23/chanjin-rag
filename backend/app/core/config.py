@@ -22,7 +22,10 @@ class Settings(BaseSettings):
         return self.app_env == "prod"
 
     # 모델 (NVIDIA API Catalog, OpenAI 호환)
-    nvidia_api_key: SecretStr | None = None
+    # 모델마다 발급받은 키가 다르다 (TRD 12.1)
+    nvidia_llm_api_key: SecretStr | None = None
+    nvidia_embed_api_key: SecretStr | None = None
+    nvidia_rerank_api_key: SecretStr | None = None
     nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
     llm_model: str = "deepseek-ai/deepseek-v4.1-flash"
     embed_model: str = "nvidia/nemotron-3.5-embed-8b"

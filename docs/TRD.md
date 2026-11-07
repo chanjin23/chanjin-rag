@@ -330,7 +330,7 @@ Worker는 하나의 프로세스에서 작업 루프와 APScheduler를 함께 �
 | --- | --- | --- | --- |
 | 1 | `extract` | 없음 | 임시 원본을 파싱해 `sections`를 저장하고, 원본 파일을 삭제. 실패해도 원본은 삭제하고 `failed`와 사유를 기록 |
 | 2 | `index` | 없음 | 청킹, Kiwi 토큰화, `chunks` 교체(한 트랜잭션). 이 시점부터 BM25로 검색됨. 이어서 `embed` 작업 등록 |
-| 3 | `embed` | 하루 100개 파일 | 최근 수정순으로 선택. 청크를 32개씩 묶어 임베딩 API 호출 |
+| 3 | `embed` | 하루 100개 파일 | 최근 수정순으로 선택. 청크를 `EMBED_BATCH_SIZE`개씩 묶어 임베딩 API 호출. 무료 엔드포인트는 여러 문장 묶음에 500을 돌려주므로 기본 1개(13장 실측), 묶음 요청이 500이면 반으로 나눠 다시 보냄 |
 
 **하루 임베딩 한도**
 
@@ -357,7 +357,7 @@ Worker는 하나의 프로세스에서 작업 루프와 APScheduler를 함께 �
 **임베딩 호출**
 
 - 문서 청크는 `input_type=passage`, 질문은 `input_type=query`로 호출하고 `truncate=END`를 씁니다. 예제의 `extra_body` 형식을 그대로 따릅니다. 예제에 있던 `modality` 값은 텍스트 전용 값을 문서에서 확인해 설정합니다.
-- API 키는 `os.environ["NVIDIA_API_KEY"]`로 읽습니다. 예제처럼 `"$NVIDIA_API_KEY"` 문자열을 넣으면 인증이 실패합니다.
+- API 키는 모델마다 따로 발급되므로 `NVIDIA_LLM_API_KEY`, `NVIDIA_EMBED_API_KEY`, `NVIDIA_RERANK_API_KEY`를 각 Provider가 자기 것만 읽습니다. 예제처럼 `"$NVIDIA_API_KEY"` 문자열을 그대로 넣으면 인증이 실패합니다.
 - 청크마다 `embed_model`을 기록하고, 문서에는 모델명과 차원을 기록합니다. 설정의 모델이 바뀌면 `backend reindex --embeddings` 대상이 됩니다.
 
 **벡터 컬럼 타입 결정**
@@ -444,7 +444,7 @@ flowchart TD
 
 - 존재하지 않는 인용 번호는 지웁니다.
 - 인용이 하나도 없는 답변은 근거 충실성 지표에서 실패로 셉니다.
-- 모델이 추론(thinking) 텍스트를 내보내면 답변과 저장에서 제외합니다.
+- DeepSeek은 기본으로 답 앞에 영어 추론 텍스트(`reasoning_content`)를 냅니다. 요청에 `chat_template_kwargs: {"thinking": false}`를 넣어 끄고(`LLM_THINKING=false`), 그래도 추론 텍스트가 오면 답변과 저장에서 제외합니다.
 - LLM 설정은 PRD 검토대로 `temperature` 0\~0.3, `max_tokens` 1,024\~2,048, `stream=True`로 둡니다.
 
 ### 7.2 Hybrid 검색 SQL
@@ -682,7 +682,7 @@ web/src/
 | Agent 토큰 | 32바이트 난수, DB에는 해시만 저장, PC에서는 keyring에 보관, 폐기 가능(`revoked_at`) |
 | 업로드 | 경로는 `sync_config`의 루트 안이고 고정 제외에 걸리지 않는지 서버에서 다시 검증, 크기 상한(Nginx `client_max_body_size 12m`, `max_file_mb`를 바꿀 때 함께 바꿈), 확장자 화이트리스트(대소문자 무시), 해시 재검증 |
 | 파서 격리 | 파싱은 Worker의 하위 프로세스에서 타임아웃과 메모리 상한을 두고 실행. 실패해도 Worker 본체는 유지 |
-| 비밀값 | `.env`(권한 600)에만 두고 Git에는 `.env.example`만 올립니다. 대상: `NVIDIA_API_KEY`, `DATABASE_URL`, `BACKUP_AGE_RECIPIENT`(공개키) |
+| 비밀값 | `.env`(권한 600)에만 두고 Git에는 `.env.example`만 올립니다. 대상: `NVIDIA_LLM_API_KEY`, `NVIDIA_EMBED_API_KEY`, `NVIDIA_RERANK_API_KEY`, `DATABASE_URL`, `BACKUP_AGE_RECIPIENT`(공개키) |
 | 저장 데이터 | OCI 부트 볼륨 기본 암호화. 원본은 추출 직후 삭제. 백업은 age로 암호화하고 개인키는 VM에 두지 않음. 개인키는 PC와 비밀번호 관리자(또는 오프라인 매체) 두 곳에 보관 |
 | 데이터 삭제 | 범위 제외는 즉시, 로컬 삭제는 30일 뒤 영구 삭제(6.5) |
 | 로그 | API 키, 쿠키, 토큰은 기록하지 않습니다. 청크 본문과 질문 원문은 애플리케이션 로그에 남기지 않고 질의 로그(DB)에만 저장합니다. 앱 로그에는 질문 길이와 대화 ID만 남깁니다. 개발·E2E(`LOG_QUERY_TEXT=true`)에서만 질문 원문을 기록할 수 있습니다 |
@@ -694,7 +694,9 @@ web/src/
 
 | 변수 | 기본값 | 설명 |
 | --- | --- | --- |
-| `NVIDIA_API_KEY` | | 필수 |
+| `NVIDIA_LLM_API_KEY` | | 필수. LLM 모델용 키 |
+| `NVIDIA_EMBED_API_KEY` | | 필수. 임베딩 모델용 키 |
+| `NVIDIA_RERANK_API_KEY` | | `RERANK_ENABLED=true`면 필수. 재정렬 모델용 키 |
 | `NVIDIA_BASE_URL` | `https://integrate.api.nvidia.com/v1` | |
 | `LLM_MODEL` | `deepseek-ai/deepseek-v4.1-flash` | |
 | `EMBED_MODEL` | `nvidia/nemotron-3.5-embed-8b` | |
@@ -702,7 +704,9 @@ web/src/
 | `RERANK_ENABLED` | `true` | 평가 결과로 결정 |
 | `EMBED_DAILY_FILE_LIMIT` | `100` | |
 | `EMBED_DAILY_CHUNK_LIMIT` | `0`(제한 없음) | 13장 3번 실측 후 확정(6.2) |
-| `EMBED_BATCH_SIZE` | `32` | |
+| `EMBED_BATCH_SIZE` | `1` | 무료 엔드포인트는 묶음 요청에 500(13장 실측). 유료·자체 호스팅이면 32 |
+| `EMBED_DIM` | `2048` | 모델 기본 4096차원을 `dimensions`로 줄임(6.3) |
+| `LLM_THINKING` | `false` | DeepSeek 추론 텍스트 끄기(7.1) |
 | `LOCAL_DELETED_RETENTION_DAYS` | `30` | 로컬 삭제 문서 보관 기간(6.5) |
 | `MASS_DELETE_GUARD_RATIO` | `0.2` | 한 번에 이 비율을 넘는 삭제 판정은 보류(6.1) |
 | `SYNC_RUN_STALE_MINUTES` | `10` | 하트비트가 끊긴 동기화 실행을 `abandoned`로 바꾸는 시간 |
@@ -746,7 +750,20 @@ web/src/
 
 ## 13. 구축 초기 검증
 
-본격 개발 전에 아래를 먼저 확인합니다. 결과에 따라 이 문서의 해당 절을 고칩니다.
+본격 개발 전에 아래를 먼저 확인합니다. 결과에 따라 이 문서의 해당 절을 고칩니다. 2·3번은 `uv run python scripts/check_nvidia.py`로 확인합니다.
+
+**실측 결과 (2026-11-07 23시, 무료 엔드포인트, 모델별 키)**
+
+| 항목 | 결과 | 반영 |
+| --- | --- | --- |
+| 모델 ID | `deepseek-ai/deepseek-v4.1-flash`, `nvidia/nemotron-3.5-embed-8b` 모두 모델 목록에 있음 | 12.1 그대로 |
+| 임베딩 차원 | 기본 4096차원, `dimensions=2048`이면 2048차원으로 줄어듦 | 6.3 ①(2048, `halfvec`) 확정 |
+| 임베딩 묶음 | 문장 1개씩은 12/12 성공, 3개 묶음은 12/12 실패(HTTP 500 `service inference failed`) | 6.2, `EMBED_BATCH_SIZE=1` |
+| 임베딩 지연 | 질문 1개 약 0.2~0.5초 | 7.4 예산(0.5초) 안 |
+| 재정렬 | `ai.api.nvidia.com/.../reranking` 정상, 관련 문장 1위, 약 0.2~1.6초 | 7.4 예산(0.8초) 근처 |
+| LLM 응답 | 한국어 답변 정상. 추론을 끄면(`thinking=false`) 추론 텍스트 없음 | 7.1 답변 후처리 |
+| **LLM 지연** | **응답 시작까지 대기 66~81초, 첫 답변 글자 79~94초, 전체 86~99초**(3회) | **PRD 7장 목표(첫 토큰 3초, p95 8초)와 큰 차이. 시간대별 재측정과 모델 대안 검토 필요(PRD 9장 첫 번째 리스크)** |
+| 인증 오류 | 틀린 키에 401이 아니라 403 `Authorization failed` | T03 오류 변환 |
 
 | 순서 | 확인 항목 | 통과 기준 | 실패 시 |
 | --- | --- | --- | --- |
