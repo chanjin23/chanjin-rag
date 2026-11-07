@@ -6,6 +6,7 @@
 #   --only T05         이 작업만
 #   --from T05         이 작업부터
 #   --retry-blocked    막힌 작업을 다시 시도
+#   --include-deferred 미뤄 둔 작업(T18: HWP·HWPX·XLSX)도 실행
 # 자세한 내용: loop/README.md
 set -euo pipefail
 

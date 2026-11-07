@@ -68,21 +68,21 @@
     },
     {
       "id": "T04",
-      "title": "문서 파서 7종",
+      "title": "문서 파서: PDF, DOCX, PPTX, TXT, MD",
       "depends": ["T00"],
       "pytest": [
         "test_parsers.py::test_pdf_pages_and_scanned_page_warning",
         "test_parsers.py::test_docx_heading_path_and_tables",
-        "test_parsers.py::test_xlsx_header_and_formula_values",
         "test_parsers.py::test_pptx_slide_order_and_notes",
-        "test_parsers.py::test_hwpx_sections_and_tables",
         "test_parsers.py::test_txt_cp949_detection",
         "test_parsers.py::test_md_heading_path",
         "test_parsers.py::test_encrypted_pdf_failure_code",
         "test_parsers.py::test_corrupted_file_failure_code",
         "test_parsers.py::test_empty_document_is_no_text",
         "test_parsers.py::test_parser_timeout_in_subprocess",
-        "test_parsers_samples.py::test_sample_docs_parse"
+        "test_parsers.py::test_deferred_formats_report_unsupported",
+        "test_parsers_samples.py::test_sample_docs_parse",
+        "test_parsers_samples.py::test_sample_docx_and_pptx_parse"
       ],
       "e2e": [],
       "log_events": [],
@@ -353,6 +353,21 @@
         "docker compose -f deploy/compose.yaml config -q",
         "docker compose -f deploy/compose.yaml build"
       ]
+    },
+    {
+      "id": "T18",
+      "title": "(후속) HWP·HWPX·XLSX 파서",
+      "deferred": true,
+      "depends": ["T04", "T05", "T06"],
+      "pytest": [
+        "test_parsers_deferred.py::test_xlsx_header_and_formula_values",
+        "test_parsers_deferred.py::test_hwpx_sections_and_tables",
+        "test_parsers_deferred.py::test_hwp_paragraphs_or_failure_code",
+        "test_parsers_deferred.py::test_unsupported_documents_can_be_reprocessed"
+      ],
+      "e2e": [],
+      "log_events": [],
+      "extra_checks": []
     }
   ]
 }

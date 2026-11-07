@@ -201,6 +201,8 @@ class Task:
     e2e: list[str]
     log_events: list[str]
     extra_checks: list[str]
+    # 미뤄 둔 작업: 기본 실행에서 건너뛰고 --only 또는 --include-deferred로만 실행한다.
+    deferred: bool = False
 
     @property
     def spec_path(self) -> Path:
@@ -399,7 +401,7 @@ def prompt_values(task: Task, cfg: dict[str, Any], attempt: int, feedback: str) 
         "SPEC_PATH": task.spec_path.relative_to(ROOT).as_posix(),
         "TASK_SPEC": task.spec_text(),
         "FEEDBACK": feedback or "(피드백 없음. 첫 시도이거나 이전 시도가 검증 전에 끊겼습니다)",
-        "SAMPLE_DOCS_DIR": cfg["sample_docs_dir"],
+        "SAMPLE_DOCS_DIRS": ", ".join(f"`{d}`" for d in cfg["sample_docs_dirs"]),
     }
 
 
@@ -580,7 +582,7 @@ def step_verify(task: Task, cfg: dict[str, Any], run_dir: Path) -> tuple[Gate, f
     env = {
         **os.environ,
         "LOOP_REPORT_DIR": str(report_dir),
-        "SAMPLE_DOCS_DIR": cfg["sample_docs_dir"],
+        "SAMPLE_DOCS_DIRS": os.pathsep.join(cfg["sample_docs_dirs"]),
     }
     cleanup_ports(cfg["e2e_ports"])
     code, out, timed_out = run_logged(
@@ -893,15 +895,19 @@ def preflight(cfg: dict[str, Any], tasks: list[Task], strict: bool) -> list[str]
     for name, why in (("claude", "구현·채점"), ("docker", "테스트 DB"), ("bash", "verify.sh")):
         if not shutil.which(name):
             issues.append(f"{name} 명령이 없습니다({why}에 필요).")
-    if not Path(cfg["sample_docs_dir"]).is_dir():
-        issues.append(f"샘플 폴더가 없습니다: {cfg['sample_docs_dir']}")
-    ids = [t.id for t in tasks]
+    for sample_dir in cfg["sample_docs_dirs"]:
+        if not Path(sample_dir).is_dir():
+            issues.append(f"샘플 폴더가 없습니다: {sample_dir}")
+    by_id = {t.id: t for t in tasks}
+    ids = list(by_id)
     for t in tasks:
         if not t.spec_path.exists():
             issues.append(f"명세 파일이 없습니다: {t.spec_path}")
         for dep in t.depends:
             if dep not in ids or ids.index(dep) >= ids.index(t.id):
                 issues.append(f"{t.id}의 의존 작업 {dep}이 앞에 없습니다.")
+            elif by_id[dep].deferred and not t.deferred:
+                issues.append(f"{t.id}가 미뤄 둔 작업 {dep}에 의존합니다.")
     if strict:
         branch = git("rev-parse", "--abbrev-ref", "HEAD").strip()
         if branch != cfg["branch"]:
@@ -920,6 +926,9 @@ def main() -> int:
     )
     parser.add_argument("--dry-run", action="store_true", help="실행 계획과 첫 프롬프트만 출력")
     parser.add_argument("--status", action="store_true", help="진행 상태만 출력")
+    parser.add_argument(
+        "--include-deferred", action="store_true", help="미뤄 둔 작업(예: T18)도 실행"
+    )
     parser.add_argument("--max-attempts", type=int, help="작업당 최대 시도 횟수 덮어쓰기")
     args = parser.parse_args()
 
@@ -943,17 +952,19 @@ def main() -> int:
         if not args.dry_run:
             return 2
 
-    selected = tasks
+    order = [t.id for t in tasks]
+    selected = [t for t in tasks if args.include_deferred or not t.deferred]
     if args.start:
-        selected = tasks[[t.id for t in tasks].index(args.start) :]
+        selected = [t for t in selected if order.index(t.id) >= order.index(args.start)]
     if args.only:
         selected = [t for t in tasks if t.id == args.only]
 
     if args.dry_run:
-        for t in selected:
+        for t in tasks:
             ts = state["tasks"].get(t.id, {})
+            mark = "" if t in selected else " (이번 실행에서 건너뜀)"
             print(
-                f"{t.id} [{ts.get('status', 'pending')}] {t.title} "
+                f"{t.id} [{ts.get('status', 'pending')}]{mark} {t.title} "
                 f"(의존: {', '.join(t.depends) or '없음'}, pytest {len(t.pytest)}, "
                 f"E2E {len(t.e2e)}, 로그 {len(t.log_events)})"
             )

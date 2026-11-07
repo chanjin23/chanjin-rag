@@ -14,7 +14,7 @@
   "usage_limit_fallback_wait_min": 30,
   "usage_limit_max_wait_min": 360,
   "transient_error_wait_min": 5,
-  "sample_docs_dir": "C:\\Chanjin\\dev\\obsidian",
+  "sample_docs_dirs": ["C:\\Chanjin\\dev\\obsidian", "C:\\Chanjin\\dev\\디딤"],
   "e2e_ports": [8001, 5174],
   "rubric_items": {
     "requirements": 30,

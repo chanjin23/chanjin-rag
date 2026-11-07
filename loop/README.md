@@ -1,6 +1,6 @@
 # 루프 엔지니어링
 
-PRD·TRD의 MVP를 작업 18개(T00~T17)로 나눠, 사람 확인 없이 **구현 → 규칙 검사 → 기능 검증 → AI 채점 → 커밋**을 끝까지 반복합니다.
+PRD·TRD의 MVP를 작업 18개(T00~T17)로 나눠(미뤄 둔 T18 별도), 사람 확인 없이 **구현 → 규칙 검사 → 기능 검증 → AI 채점 → 커밋**을 끝까지 반복합니다.
 
 ## 실행
 
@@ -11,7 +11,10 @@ bash scripts/loop.sh --status           # 진행 상태 보고서
 bash scripts/loop.sh --only T05         # 한 작업만
 bash scripts/loop.sh --from T05         # 이 작업부터
 bash scripts/loop.sh --retry-blocked    # 막힌 작업 다시 시도(시도 횟수·시간 초기화)
+bash scripts/loop.sh --only T18         # 미뤄 둔 작업 실행(HWP·HWPX·XLSX 파서)
 ```
+
+**미뤄 둔 작업:** `tasks.json`에서 `"deferred": true`인 작업(현재 T18: HWP·HWPX·XLSX 파서)은 기본 실행에서 건너뜁니다. 그동안 이 형식의 파일은 `unsupported_format`으로 기록되고 파일명으로만 검색됩니다. 실제 샘플이 생기면 `config.json`의 `sample_docs_dirs`에 폴더를 추가하고 `--only T18`로 실행하세요.
 
 - `scripts/loop.sh`는 `../chanjin-rag-loop` 폴더에 git worktree(`loop/mvp` 브랜치)를 만들고 그 안에서 실행합니다. 원래 저장소 폴더는 건드리지 않습니다.
 - 루프 설정(`loop/`, `scripts/loop*`)은 worktree에서도 보여야 하므로 커밋된 상태여야 합니다. 설정을 바꿨으면 `loop/mvp` 브랜치에도 반영(merge 또는 cherry-pick)하세요.
@@ -57,4 +60,11 @@ bash scripts/loop.sh --retry-blocked    # 막힌 작업 다시 시도(시도 횟
 
 ## 샘플 문서
 
-`config.json`의 `sample_docs_dir`(`C:\Chanjin\dev\obsidian`)를 `SAMPLE_DOCS_DIR`로 넘깁니다. 이 폴더에는 MD·PDF·TXT만 있고 업무 메모가 섞여 있으므로, **읽기만 하고 저장소에 복사하지 않습니다**(규칙 검사가 문서 바이너리 추가를 막습니다). 없는 형식(DOCX·XLSX·PPTX·HWPX)은 테스트 안에서 생성합니다. 실제 HWP 품질은 수동 확인 항목입니다.
+`config.json`의 `sample_docs_dirs`를 `SAMPLE_DOCS_DIRS`(`;`로 구분)로 넘깁니다.
+
+| 폴더 | 들어 있는 형식 |
+| --- | --- |
+| `C:\Chanjin\dev\obsidian` | MD 191, PDF 7, TXT 2 (개인·업무 메모) |
+| `C:\Chanjin\dev\디딤` | DOCX 1, PPTX 1 (고객사 문서) |
+
+개인 메모와 고객사 문서이므로 **읽기만 하고 저장소에 복사하지 않습니다.** 내용과 파일명도 테스트·로그·기억 파일에 옮겨 적지 않습니다(개수와 비율만). 규칙 검사가 문서 바이너리 추가를 막고, 채점표가 샘플 내용 복사를 치명 결함으로 봅니다. 기대값이 필요한 테스트는 라이브러리로 만든 합성 문서를 씁니다. HWP·HWPX·XLSX는 샘플이 없어 T18로 미뤘습니다.
