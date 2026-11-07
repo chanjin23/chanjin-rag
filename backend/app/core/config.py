@@ -70,6 +70,18 @@ class Settings(BaseSettings):
     # DB. 테스트·E2E는 TEST_DATABASE_URL(5433의 테스트 DB)을 DATABASE_URL로 넘긴다
     database_url: str = "postgresql+psycopg://rag:rag@localhost:5432/rag"
 
+    # 웹 세션(TRD 11장). 운영은 항상 Secure. 로컬 HTTP(E2E 등)에서만 false로 둔다.
+    session_cookie_secure: bool = True
+    session_ttl_days: int = 14
+    login_max_failures: int = 5
+    login_lock_minutes: int = 15
+    # CSRF: Origin이 요청 Host와 다를 때 추가로 허용할 출처(쉼표로 구분, 예: https://rag.example.ts.net)
+    csrf_trusted_origins: str = ""
+
+    @property
+    def csrf_trusted_origin_list(self) -> list[str]:
+        return [o.strip().rstrip("/") for o in self.csrf_trusted_origins.split(",") if o.strip()]
+
     # 운영
     tz: str = "Asia/Seoul"
     backup_age_recipient: str | None = None
@@ -84,6 +96,8 @@ class Settings(BaseSettings):
             self.nvidia_llm_api_key = None
             self.nvidia_embed_api_key = None
             self.nvidia_rerank_api_key = None
+        if self.app_env == "prod" and not self.session_cookie_secure:
+            raise ValueError("APP_ENV=prod에서는 SESSION_COOKIE_SECURE=false를 쓸 수 없습니다")
         return self
 
 

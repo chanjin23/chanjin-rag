@@ -18,16 +18,26 @@ export function readBackendLog(): LogRecord[] {
     });
 }
 
+/** 지금까지 쌓인 로그 줄 수. `waitForBackendLog(match, { since })`로 이후 줄만 찾을 때 쓴다. */
+export function backendLogMark(): number {
+  return readBackendLog().length;
+}
+
+/** 조건에 맞는 줄을 모두 돌려준다(since: backendLogMark()로 얻은 위치 이후만). */
+export function findBackendLogs(match: (r: LogRecord) => boolean, since = 0): LogRecord[] {
+  return readBackendLog().slice(since).filter(match);
+}
+
 /** 조건에 맞는 로그 줄이 나타날 때까지 기다렸다가 돌려준다. */
 export async function waitForBackendLog(
   match: (r: LogRecord) => boolean,
-  timeoutMs = 5_000,
+  { timeoutMs = 5_000, since = 0 }: { timeoutMs?: number; since?: number } = {},
 ): Promise<LogRecord> {
   let found: LogRecord | undefined;
   await expect
     .poll(
       () => {
-        found = readBackendLog().find(match);
+        found = readBackendLog().slice(since).find(match);
         return found !== undefined;
       },
       { timeout: timeoutMs, message: `백엔드 로그(${BACKEND_LOG})에서 기대한 줄을 찾지 못함` },

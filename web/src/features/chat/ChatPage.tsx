@@ -1,7 +1,11 @@
-import { type FormEvent, type KeyboardEvent, useState } from "react";
-import { useParams } from "react-router";
+import { useQueryClient } from "@tanstack/react-query";
+import { type FormEvent, type KeyboardEvent, useCallback, useState } from "react";
+import { useLocation, useNavigate, useParams } from "react-router";
+import { ME_QUERY_KEY } from "@/api/auth";
 import type { Stage } from "@/api/chat";
+import { loginPath } from "@/features/auth/redirect";
 import { cn } from "@/lib/cn";
+import { clearDraft, loadDraft, saveDraft } from "./draft";
 import { useChatStream } from "./useChatStream";
 
 const STAGE_LABEL: Record<Stage, string> = {
@@ -16,14 +20,35 @@ const STAGE_LABEL: Record<Stage, string> = {
 export function ChatPage() {
   // 대화 저장(F-11)은 DB를 붙일 때 구현한다. 지금은 URL의 id 또는 "draft"를 쓴다.
   const { conversationId = "draft" } = useParams();
-  const { messages, stage, isStreaming, send, stop } = useChatStream(conversationId);
-  const [input, setInput] = useState("");
+  return <ChatView key={conversationId} conversationId={conversationId} />;
+}
+
+function ChatView({ conversationId }: { conversationId: string }) {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const queryClient = useQueryClient();
+
+  // 세션이 만료돼 보내지 못한 질문은 보존하고 로그인 화면으로 보낸다. 로그인 후 이 화면으로
+  // 돌아오면 입력창에 다시 채운다(TRD 8.3, 9.2).
+  const onUnauthenticated = useCallback(
+    (text: string) => {
+      saveDraft(conversationId, text);
+      queryClient.removeQueries({ queryKey: ME_QUERY_KEY });
+      navigate(loginPath(`${location.pathname}${location.search}`, "expired"), { replace: true });
+    },
+    [conversationId, location.pathname, location.search, navigate, queryClient],
+  );
+  const { messages, stage, isStreaming, send, stop } = useChatStream(conversationId, {
+    onUnauthenticated,
+  });
+  const [input, setInput] = useState(() => loadDraft(conversationId));
 
   const submit = (e?: FormEvent) => {
     e?.preventDefault();
     const text = input.trim();
     if (!text || isStreaming) return;
     setInput("");
+    clearDraft(conversationId);
     void send(text);
   };
 

@@ -23,8 +23,10 @@ if sys.platform == "win32":
 from collections.abc import AsyncIterator, Iterator  # noqa: E402
 from pathlib import Path  # noqa: E402
 
+import httpx  # noqa: E402
 import psycopg  # noqa: E402
 import pytest  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 from sqlalchemy.pool import NullPool  # noqa: E402
 
@@ -124,3 +126,52 @@ def sample_docs_dirs() -> list[Path]:
     if missing:
         pytest.fail(f"SAMPLE_DOCS_DIRS의 {missing}번째 폴더가 없습니다")
     return dirs
+
+
+# ---------------------------------------------------------------------------
+# 웹 API 클라이언트 (인증, TRD 11장)
+# ---------------------------------------------------------------------------
+
+# 웹 API는 GET이 아닌 요청에 CSRF 헤더 두 개가 필요하다. 테스트 클라이언트의 Host는 `testserver`.
+CSRF_HEADERS = {"X-Requested-With": "fetch", "Origin": "https://testserver"}
+
+
+@pytest.fixture
+def web_client() -> Iterator[TestClient]:
+    """로그인된 상태의 동기 TestClient(DB 없이 웹 API를 부를 때).
+
+    세션 의존성을 가짜 사용자로 바꾸고 CSRF 헤더를 기본으로 붙인다. 실제 로그인·세션 흐름은
+    `api_client`로 test_auth.py에서 확인한다.
+    """
+    from app.api.deps import require_web_user
+    from app.db.models import User
+    from app.main import app
+
+    app.dependency_overrides[require_web_user] = lambda: User(id=1, username="tester")
+    try:
+        yield TestClient(app, base_url="https://testserver", headers=CSRF_HEADERS)
+    finally:
+        app.dependency_overrides.pop(require_web_user, None)
+
+
+@pytest.fixture
+async def api_client(session: AsyncSession) -> AsyncIterator[httpx.AsyncClient]:
+    """테스트 DB 세션(`session`, 끝나면 롤백)을 쓰는 async 클라이언트. 쿠키를 주고받는다.
+
+    TestClient는 앱을 다른 이벤트 루프에서 돌려 async 세션을 공유할 수 없어 ASGITransport를 쓴다.
+    https base_url이어야 Secure 쿠키를 다시 보낸다.
+    """
+    from app.db.engine import get_session
+    from app.main import app
+
+    async def _session() -> AsyncIterator[AsyncSession]:
+        yield session
+
+    app.dependency_overrides[get_session] = _session
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="https://testserver"
+        ) as client:
+            yield client
+    finally:
+        app.dependency_overrides.pop(get_session, None)

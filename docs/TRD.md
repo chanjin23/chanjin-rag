@@ -240,9 +240,9 @@ stateDiagram-v2
 
 | 테이블 | 핵심 컬럼 | 설명 |
 | --- | --- | --- |
-| `users` | `id`, `username`, `password_hash`, `failed_logins`, `locked_until` | 1행. `backend create-user` CLI로만 생성 |
+| `users` | `id`, `username`, `password_hash`, `failed_logins`, `locked_until` | 1행. `rag-backend create-user` CLI로만 생성(비밀번호 변경·잠금 해제는 `rag-backend reset-password`) |
 | `sessions` | `id_hash`, `user_id`, `expires_at`, `last_seen_at` | 쿠키 값의 SHA-256만 저장 |
-| `api_tokens` | `id`, `name`, `token_hash`, `last_used_at`, `revoked_at` | Sync Agent용. `backend create-token` CLI로 발급 |
+| `api_tokens` | `id`, `name`, `token_hash`, `last_used_at`, `revoked_at` | Sync Agent용. `rag-backend create-token` CLI로 발급(평문은 발급 때 한 번만 출력) |
 
 ### 5.3 대화, 로그, 평가
 
@@ -546,9 +546,13 @@ NVIDIA API 실측값(13장)이 예산을 넘으면 rewrite 생략 조건을 넓�
 
 | 메서드 | 경로 | 설명 |
 | --- | --- | --- |
-| POST | `/auth/login` | 아이디·비밀번호 → 세션 쿠키 발급. 5회 실패 시 15분 잠금. 잠금 중에는 남은 시간(`retry_after_s`)을 돌려줌 |
+| POST | `/auth/login` | 아이디·비밀번호 → 세션 쿠키 발급. 실패는 401 `invalid_credentials`. 연속 5회 실패 시 15분 잠금. 잠금 중에는 429 `login_locked`와 남은 시간(`retry_after_s`, `Retry-After` 헤더)을 돌려줌(맞는 비밀번호여도) |
 | POST | `/auth/logout` | 세션 삭제 |
 | GET | `/auth/me` | 로그인 상태 확인 |
+
+- 세션이 없거나 만료되면 401 `unauthenticated`, CSRF 검사에 걸리면 403 `csrf_failed`, Sync API 토큰이 없거나 폐기됐으면 401 `invalid_token`.
+- 로컬 HTTP(개발·E2E)에서만 `SESSION_COOKIE_SECURE=false`로 쿠키의 `Secure`를 끌 수 있습니다. `APP_ENV=prod`에서는 설정 자체를 거부합니다.
+- CSRF `Origin` 검사는 Origin의 호스트:포트가 요청 `Host`와 같아야 통과합니다. 프록시가 `Host`를 바꾸면 `CSRF_TRUSTED_ORIGINS`에 출처를 적습니다.
 
 ### 8.2 Sync API (Bearer 토큰, Agent 전용)
 
@@ -596,7 +600,7 @@ FastAPI의 OpenAPI 스키마에서 `openapi-typescript`로 웹의 타입을 생�
 
 | 경로 | 화면 | 주요 요소 |
 | --- | --- | --- |
-| `/login` | 로그인 | 잠금 시 남은 시간 표시, "비밀번호를 잊었으면 서버에서 `backend reset-password` 실행" 안내 |
+| `/login` | 로그인 | 잠금 시 남은 시간 표시, "비밀번호를 잊었으면 서버에서 `rag-backend reset-password` 실행" 안내 |
 | `/` , `/c/:id` | 채팅 | 왼쪽 대화 목록(이름 변경, 삭제), 가운데 메시지와 입력창(위에 디렉터리·형식·수정일·로컬 삭제 포함 필터), 오른쪽 출처 패널(접기 가능). 입력창 위에 색인 범위 한 줄(예: "키워드 검색 1,000 · 의미 검색 340 · 완료 예상 11월 14일"). 문서가 0개면 빈 화면 대신 첫 실행 체크리스트 |
 | `/documents` | 문서 | 상태별 탭(대기, 처리 중, BM25만, 완료, 텍스트 없음, 실패, 파일명만, 로컬 삭제), 실패 사유와 해결 안내(3.4 표), 재처리 버튼(누르면 "다음 동기화 대기"와 "지금 동기화" 버튼 표시), 영구 삭제 버튼 |
 | `/documents/:id` | 문서 상세 | 위치별 추출 텍스트, 인용 위치로 스크롤·강조, "이 문서 요약" 버튼. 문서가 삭제됐거나 인용 이후 바뀌었으면 "원문이 바뀌었거나 삭제되었습니다"와 저장된 인용 구절 표시 |

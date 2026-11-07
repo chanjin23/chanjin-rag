@@ -2,15 +2,17 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 
-client = TestClient(app)
+CSRF_HEADERS = {"X-Requested-With": "fetch", "Origin": "https://testserver"}
 
 
 def test_health() -> None:
-    assert client.get("/api/health").json() == {"status": "ok"}
+    assert TestClient(app).get("/api/health").json() == {"status": "ok"}
 
 
-def test_post_message_streams_trd_events_in_order() -> None:
-    with client.stream("POST", "/api/conversations/test/messages", json={"text": "안녕"}) as res:
+def test_post_message_streams_trd_events_in_order(web_client: TestClient) -> None:
+    with web_client.stream(
+        "POST", "/api/conversations/test/messages", json={"text": "안녕"}
+    ) as res:
         assert res.status_code == 200
         assert res.headers["content-type"].startswith("text/event-stream")
         events = [
@@ -23,5 +25,14 @@ def test_post_message_streams_trd_events_in_order() -> None:
     assert events[-1] == "done"
 
 
-def test_post_message_rejects_empty_text() -> None:
-    assert client.post("/api/conversations/test/messages", json={"text": ""}).status_code == 422
+def test_post_message_rejects_empty_text(web_client: TestClient) -> None:
+    res = web_client.post("/api/conversations/test/messages", json={"text": ""})
+    assert res.status_code == 422
+
+
+def test_post_message_requires_session() -> None:
+    """세션 쿠키가 없으면 401 `unauthenticated`(TRD 8.3). 웹은 이때 로그인 화면으로 보낸다."""
+    client = TestClient(app, base_url="https://testserver", headers=CSRF_HEADERS)
+    res = client.post("/api/conversations/test/messages", json={"text": "안녕"})
+    assert res.status_code == 401
+    assert res.json()["error"]["code"] == "unauthenticated"

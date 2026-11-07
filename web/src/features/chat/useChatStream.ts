@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { sendMessage, type Source, type Stage } from "@/api/chat";
+import { isUnauthenticated } from "@/api/client";
 
 export type ChatMessage = {
   id: string;
@@ -10,8 +11,13 @@ export type ChatMessage = {
   error?: string;
 };
 
+type Options = {
+  /** 세션이 없거나 만료돼 401을 받았을 때. 보내지 못한 질문을 넘긴다(입력 보존용). */
+  onUnauthenticated?: (text: string) => void;
+};
+
 /** 질문을 보내고 SSE 토큰을 받아 마지막 답변 메시지에 이어 붙인다. */
-export function useChatStream(conversationId: string) {
+export function useChatStream(conversationId: string, { onUnauthenticated }: Options = {}) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [stage, setStage] = useState<Stage | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -44,7 +50,11 @@ export function useChatStream(conversationId: string) {
           else if (ev.type === "error") patchAssistant(assistantId, (m) => ({ ...m, error: ev.message }));
         }
       } catch (err) {
-        if (!controller.signal.aborted) {
+        if (isUnauthenticated(err)) {
+          // 보내지 못한 질문 말풍선은 지우고, 질문은 호출한 쪽이 보존한다
+          setMessages((prev) => prev.filter((m) => m.id !== userId && m.id !== assistantId));
+          onUnauthenticated?.(text);
+        } else if (!controller.signal.aborted) {
           const message = err instanceof Error ? err.message : String(err);
           patchAssistant(assistantId, (m) => ({ ...m, error: message }));
         }
@@ -54,7 +64,7 @@ export function useChatStream(conversationId: string) {
         abortRef.current = null;
       }
     },
-    [conversationId, patchAssistant],
+    [conversationId, patchAssistant, onUnauthenticated],
   );
 
   const stop = useCallback(() => abortRef.current?.abort(), []);
