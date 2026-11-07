@@ -879,6 +879,7 @@ def write_report(tasks: list[Task], state: dict[str, Any]) -> Path:
             f"- 다시 시도: `bash scripts/loop.sh --retry-blocked --only {t.id}`",
         ]
     lines += ["", "실제 인프라가 필요한 확인 항목은 `loop/MANUAL_CHECKS.md`를 보세요."]
+    STATE_DIR.mkdir(exist_ok=True)
     path = STATE_DIR / "report.md"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
