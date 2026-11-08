@@ -193,7 +193,7 @@ chanjin-rag/
 │  ├─ alembic/
 │  └─ tests/
 ├─ agent/                   # Windows Sync Agent
-│  ├─ rag_agent/            # scan, manifest, upload, backup, protocol(run·reveal), install
+│  ├─ rag_agent/            # scan, state, sync(manifest·upload), protocol(run·reveal), install, backup(T14)
 │  └─ tests/
 ├─ eval/                    # 평가 CLI와 평가셋
 │  ├─ rag_eval/
@@ -359,7 +359,7 @@ sequenceDiagram
 - 동시에 한 인스턴스만 실행합니다(Windows 이름 있는 뮤텍스). 이미 실행 중이면 바로 종료합니다.
 - 실행 중에는 1분마다 `sync_runs.heartbeat_at`을 갱신합니다. 서버는 10분 넘게 갱신이 없는 `running` 실행을 `abandoned`로 바꿉니다(PC 절전, 강제 종료).
 - 업로드 실패는 로컬 SQLite 재시도 큐에 남기고, 다음 실행에서 manifest 판정을 다시 받아 자연스럽게 재시도합니다. 판정 후 업로드 전에 사라진 파일은 건너뜁니다.
-- 다른 프로그램이 잠근 파일(열려 있는 Excel 등)은 이번 실행에서 건너뛰고 manifest에도 넣지 않습니다. 삭제로 오판하지 않도록 `scan_errors`에 파일 경로로 넣습니다.
+- 다른 프로그램이 잠근 파일(열려 있는 Excel 등)은 이번 실행에서 건너뛰고 manifest에도 넣지 않습니다. 삭제로 오판하지 않도록 `scan_errors`에 파일 경로로 넣습니다. 잠금은 해시를 계산하려고 열 때 알 수 있으므로, (크기, 수정 시각)이 같아 캐시된 해시를 쓰는 파일은 manifest에 들어가고 업로드가 필요하면 그때 실패해 재시도 큐로 갑니다. 설정된 루트가 없거나 열리지 않아도 `scan_errors`로 보냅니다.
 - 고정 제외(코드에 있음, 웹에서 지울 수 없음): `/project/`, `/backup/`. `C:\Chanjin\dev` 기준이며 앞의 `/`가 있어야 하위의 같은 이름 폴더를 빼지 않습니다.
 - 기본 제외 패턴(gitignore 문법, 웹에서 편집 가능): `.git/`, `node_modules/`, `.venv/`, `venv/`, `__pycache__/`, `~$*`, `*.tmp`.
 - 지원 확장자(`.pdf .txt .md .docx .hwp .hwpx .xlsx .pptx`)만 대소문자 구분 없이 manifest에 넣습니다. 그 밖의 형식(`.doc`, `.xls`, `.ppt` 등)은 건너뛴 수를 형식별로 `stats`에 남겨 화면에 보여줍니다.
@@ -733,6 +733,19 @@ web/src/
 
 **CLI 명령:** `rag-agent sync`(수동 실행, F-03), `rag-agent status`, `rag-agent install`, `rag-agent uninstall`, `rag-agent login`, `rag-agent restore-info`(복구 안내 출력)
 
+**구현 세부(`agent/rag_agent/`):**
+
+- 모듈: `scan`(스캔·해시 캐시), `state`(state.db), `rules`(범위·제외 규칙), `client`(Sync API), `sync`(실행 흐름·heartbeat), `lock`(단일 인스턴스), `protocol`(`run`·`reveal`), `install`, `credentials`(토큰·서버 주소), `logs`(agent.log), `cli`.
+- 명령 옵션: `sync --source cli|web|schedule`(작업 스케줄러는 `schedule`), `install --dry-run`·`uninstall --dry-run`(등록할 작업 XML과 레지스트리 키·값을 출력만), `login --server <주소>`(토큰은 숨긴 입력으로 받아 keyring 서비스 `chanjin-rag`/`agent-token`에 저장, 서버 주소는 state.db), `protocol <URL>`(URL 프로토콜 진입점).
+- `state.db` 테이블: `files`(path\_key, NFC 경로, 파일 시스템 경로, 크기, 수정 시각(ns), SHA-256, reveal 키), `retry_queue`(업로드·메타 등록 실패: 이유, 시도 횟수), `kv`(서버 주소, 마지막 `sync_config`, 마지막 실행 결과), `protocol_calls`(반복 호출 제한 기록).
+- 해시 캐시 키는 path\_key이고, (크기, 수정 시각)이 같으면 파일을 열지 않고 저장된 해시를 씁니다. 이번 스캔에서 보지 못한 항목은 지우되, `scan_errors` 아래 항목은 남깁니다.
+- 경로: manifest에는 NFC 경로를 보내고, 파일은 파일 시스템이 준 경로 그대로 엽니다(NFD 이름 파일을 NFC 경로로 열면 찾지 못함).
+- 재시도 큐: 업로드 실패(5xx, 연결 오류, `hash_mismatch` 등)를 남기고 실행은 `succeeded`로 끝냅니다(통계 `upload_failed`). 다음 실행의 manifest 판정에 다시 `upload`로 나오면 올리고, 성공하거나 더 이상 업로드 판정이 아니면 큐에서 지웁니다. 401(토큰 폐기)은 실행을 `failed`로 끝냅니다.
+- 완료 통계(`stats`): `files`, `hashed`, `hash_reused`, `skipped_formats`(형식별 건수), `excluded`, `links_skipped`, `scan_errors`, `uploaded`, `upload_unchanged`, `upload_failed`, `meta_registered`, `meta_failed`, `vanished`(판정 뒤 사라진 파일), `retry_queue`.
+- 단일 인스턴스: 이름 있는 뮤텍스 `Local\chanjin-rag-agent`. 이미 있으면 서버에 요청하지 않고 끝냅니다.
+- 로그(`agent.log`, JSON 한 줄, 자정 순환 7개 보관): `agent.sync.started`, `agent.scan.completed`, `agent.manifest.judged`, `agent.upload.failed`, `agent.file.vanished`, `agent.heartbeat.failed`, `agent.sync.completed`, `agent.sync.failed`, `agent.instance.already_running`, `agent.protocol.{ran,revealed,rejected,rate_limited,not_found}`. 경로·파일명·본문·토큰은 남기지 않고 `run_id`, 건수, 해시 앞 8자리만 남깁니다. 토큰이 메시지에 섞여도 가리는 필터를 둡니다.
+- 개발·테스트용 환경 변수: `RAG_AGENT_HOME`(상태 폴더, 이때 뮤텍스 이름에 폴더 해시를 붙여 실제 Agent와 겹치지 않음), `RAG_AGENT_SERVER`, `RAG_AGENT_TOKEN`, `RAG_AGENT_SCAN_ROOTS`(`;` 구분). `RAG_AGENT_SCAN_ROOTS`는 서버 루트를 로컬에서 좁히기만 하고(서버 루트 밖 값은 버림), 스캔하지 않은 서버 루트는 `scan_errors`로 보내 그 아래 문서가 삭제로 판정되지 않게 합니다. E2E가 실제 문서 폴더를 읽지 않고 Agent를 실행하는 데 씁니다.
+
 **실패 알림:** MVP에서는 Agent가 실패를 `agent.log`에만 남기고, 웹의 "마지막 동기화가 하루 넘음" 경고 배지로 알아챕니다. 토큰 폐기(401)나 서버 연결 실패를 Windows 알림으로 띄우는 기능은 후속(F-21)입니다.
 
 ### 10.2 URL 프로토콜 보안
@@ -746,6 +759,10 @@ web/src/
   - 그 경로가 현재 수집 루트 안에 있고, 제외 패턴에 걸리지 않고, 실제로 존재하는 파일일 때만 `explorer.exe /select,<경로>`를 인자 배열로 실행합니다. 셸을 거치지 않습니다.
   - 파일을 실행하거나 여는 동작은 없습니다. 조건에 맞지 않으면 아무것도 하지 않고 `agent.log`에만 남깁니다.
 - 짧은 시간에 반복 호출되면(동작별로 1분 안에 2회 이상, `reveal`은 10초 안에 3회 이상) 무시합니다.
+  - 구현: `run`은 60초 안에 이미 처리한 호출이 있으면 무시(2회째부터), `reveal`은 10초 안에 이미 2회 처리했으면 무시(3회째부터)합니다. 호출마다 새 프로세스가 뜨므로 기록은 `state.db`에 두고, 형식 검사를 통과한 호출만 셉니다.
+- 형식 세부: 동작 이름과 스킴은 대소문자를 무시하고 `chanjin-sync://run/`처럼 끝 `/`는 허용합니다. 그 밖의 경로, 사용자 정보·포트가 있으면 거절합니다. `run`의 `source`는 `web`·`cli`·`schedule` 중 하나이고 없으면 `web`, 같은 매개변수가 두 번 오면 거절합니다. `k`는 대문자 16진수도 받아 소문자로 바꿉니다.
+- `k` 계산: `sha256(path_key의 UTF-8 바이트)`의 16진수 소문자. `path_key`는 `documents.path_key`와 같은 식(NFC → 소문자 → NFC)입니다. Agent는 스캔 때 각 파일의 `k`를 `state.db`에 저장해 둡니다.
+- `reveal`은 마지막 동기화 때 저장한 `sync_config`(state.db)로 범위를 확인하고, 실제 파일 경로가 링크로 허용 폴더 밖을 가리키는 경우도 거절합니다. 탐색기는 `%SystemRoot%\explorer.exe`를 `["explorer.exe 경로", "/select,<경로>"]` 인자 배열로 실행합니다.
 - 최악의 경우에도 "평소의 동기화를 한 번 더 실행"하거나 "내 파일의 위치를 탐색기로 보여주는 것" 이상의 일이 일어나지 않게 합니다.
 
 ### 10.3 백업 수신
