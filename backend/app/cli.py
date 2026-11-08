@@ -1,5 +1,7 @@
 """백엔드 관리 CLI(`rag-backend`). reindex는 해당 작업에서 추가한다.
 
+수집(TRD 6.2): `worker`(Ingestion Worker), `ingest-local <폴더>`(개발·E2E 시드).
+
 인증(TRD 5.2, 11장): `create-user`, `reset-password`, `create-token`.
 - 비밀번호는 기본으로 화면에 보이지 않게 두 번 묻는다. 스크립트(E2E 등)는 `--password-stdin`으로
   표준 입력 첫 줄을 넘긴다. 명령줄 인자로는 받지 않는다(셸 기록·프로세스 목록에 남지 않게).
@@ -7,9 +9,11 @@
 """
 
 import asyncio
+import signal
 import sys
-from collections.abc import Awaitable, Callable
-from typing import NoReturn
+from collections.abc import Awaitable, Callable, Coroutine
+from pathlib import Path
+from typing import Annotated, Any, NoReturn
 
 import typer
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -54,6 +58,13 @@ def downgrade(
     db_migrate.downgrade(revision)
 
 
+def _run_async[T](main: Callable[[], Coroutine[Any, Any, T]]) -> T:
+    if sys.platform == "win32":
+        # psycopg async는 Windows Proactor 루프에서 동작하지 않는다(app.db.engine 참고)
+        return asyncio.run(main(), loop_factory=asyncio.SelectorEventLoop)
+    return asyncio.run(main())
+
+
 def _run_db[T](work: Callable[[AsyncSession], Awaitable[T]]) -> T:
     """명령 하나를 DB 트랜잭션 하나로 실행하고 commit한다. 엔진은 명령마다 만들고 닫는다."""
     from app.db.engine import create_engine, create_sessionmaker
@@ -68,10 +79,7 @@ def _run_db[T](work: Callable[[AsyncSession], Awaitable[T]]) -> T:
         finally:
             await engine.dispose()
 
-    if sys.platform == "win32":
-        # psycopg async는 Windows Proactor 루프에서 동작하지 않는다(app.db.engine 참고)
-        return asyncio.run(main(), loop_factory=asyncio.SelectorEventLoop)
-    return asyncio.run(main())
+    return _run_async(main)
 
 
 def _read_password(from_stdin: bool) -> str:
@@ -139,6 +147,89 @@ def create_token(
     typer.echo(f"토큰을 발급했습니다: {token.name} (id={token.id})")
     typer.echo("아래 토큰은 다시 볼 수 없습니다. Agent에 바로 등록하세요(`rag-agent login`).")
     typer.echo(raw)
+
+
+async def _close_provider(provider: object) -> None:
+    aclose = getattr(provider, "aclose", None)
+    if aclose is not None:
+        await aclose()
+
+
+@app.command("ingest-local")
+def ingest_local(
+    folder: Annotated[Path, typer.Argument(help="수집할 로컬 폴더(SYNC_ALLOWED_ROOT 하위)")],
+    process: bool = typer.Option(
+        True, "--process/--no-process", help="큐에 넣은 뒤 바로 처리할지(기본: 처리)"
+    ),
+) -> None:
+    """로컬 폴더 파일을 업로드와 같은 방식으로 큐에 넣고 처리한다(개발·E2E 시드용, Agent 불필요)."""
+    from app.db.engine import create_engine, create_sessionmaker
+    from app.ingest.local import LocalIngestReport, OutOfScopeError
+    from app.ingest.local import ingest_local as run_ingest
+    from app.jobs.runner import JobRunner
+    from app.providers.factory import create_embedding_provider
+
+    _setup_logging()
+
+    async def main() -> LocalIngestReport:
+        engine = create_engine()
+        provider = create_embedding_provider() if process else None
+        try:
+            sessionmaker = create_sessionmaker(engine)
+            runner = JobRunner(sessionmaker, provider) if provider is not None else None
+            return await run_ingest(sessionmaker, folder, runner=runner)
+        finally:
+            if provider is not None:
+                await _close_provider(provider)
+            await engine.dispose()
+
+    try:
+        report = _run_async(main)
+    except OutOfScopeError as e:
+        _fail(f"수집 범위 밖의 폴더입니다({e.reason}). SYNC_ALLOWED_ROOT 하위만 수집합니다")
+    typer.echo(
+        f"접수: 새 버전 {report.queued}, 변경 없음 {report.unchanged}, "
+        f"파일명만 {report.meta_only}, 건너뜀 {sum(report.skipped.values())}"
+    )
+    if report.run is not None:
+        typer.echo(f"처리한 작업: {report.run.total} {report.run.counts}")
+        if report.run.quota_exhausted is not None:
+            q = report.run.quota_exhausted
+            typer.echo(f"임베딩 한도 도달({q.reason}): {q.resume_at.isoformat()}에 다시 처리합니다")
+    typer.echo(f"문서 상태: {report.statuses}")
+
+
+@app.command()
+def worker(
+    name: str = typer.Option("worker", help="하트비트에 기록할 Worker 이름"),
+) -> None:
+    """Ingestion Worker를 실행한다(작업 큐 + APScheduler). Ctrl+C로 멈춘다."""
+    from app.db.engine import create_engine, create_sessionmaker
+    from app.jobs.runner import JobRunner
+    from app.jobs.worker import Worker
+    from app.providers.factory import create_embedding_provider
+
+    _setup_logging()
+
+    async def main() -> None:
+        engine = create_engine()
+        provider = create_embedding_provider()
+        sessionmaker = create_sessionmaker(engine)
+        w = Worker(JobRunner(sessionmaker, provider), sessionmaker, name=name)
+        loop = asyncio.get_running_loop()
+        if sys.platform != "win32":
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(sig, w.stop)
+        try:
+            await w.run()
+        finally:
+            await _close_provider(provider)
+            await engine.dispose()
+
+    try:
+        _run_async(main)
+    except KeyboardInterrupt:
+        pass
 
 
 @app.command()

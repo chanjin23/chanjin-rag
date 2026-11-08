@@ -78,6 +78,18 @@ class Settings(BaseSettings):
     # Kiwi 사용자 사전(TRD 6.4). 없으면 저장소의 deploy/kiwi_user_dict.txt.
     # 파일이 없으면 사전 없이 동작한다
     kiwi_user_dict_path: str | None = None
+    # 수집 허용 최상위 폴더(PRD 3장: C:\Chanjin\dev 하위만). 고정 제외 `/project/`, `/backup/`은
+    # 이 폴더 기준이다. 테스트·E2E는 임시 폴더로 바꿔 같은 검증을 적용한다.
+    sync_allowed_root: str = r"C:\Chanjin\dev"
+    # 업로드 원본 임시 보관 폴더(TRD 3.2 `tmp` 볼륨). 추출이 끝나면(실패해도) 지운다.
+    # 비우면 저장소의 var/tmp
+    upload_tmp_dir: str | None = None
+    # 작업 큐(TRD 6.2): 재시도 상한, 멈춘 작업으로 보는 시간, 빈 큐 확인 간격
+    job_max_attempts: int = 5
+    job_stale_lock_minutes: int = 10
+    worker_poll_seconds: float = 5.0
+    # 429가 계속될 때 작업을 미루는 시간(분)
+    job_rate_limit_delay_minutes: int = 30
     local_deleted_retention_days: int = 30
     mass_delete_guard_ratio: float = 0.2
     sync_run_stale_minutes: int = 10
@@ -92,6 +104,10 @@ class Settings(BaseSettings):
     login_lock_minutes: int = 15
     # CSRF: Origin이 요청 Host와 다를 때 추가로 허용할 출처(쉼표로 구분, 예: https://rag.example.ts.net)
     csrf_trusted_origins: str = ""
+
+    @property
+    def upload_tmp_path(self) -> Path:
+        return Path(self.upload_tmp_dir) if self.upload_tmp_dir else REPO_ROOT / "var" / "tmp"
 
     @property
     def csrf_trusted_origin_list(self) -> list[str]:

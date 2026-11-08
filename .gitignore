@@ -14,6 +14,7 @@ web/e2e/.logs/
 web/e2e/.results/
 web/e2e/.report/
 web/e2e/.auth/
+web/e2e/.tmp/
 
 # 루프 실행 상태와 로그 (scripts/loop/loop.py)
 .loop/
@@ -29,3 +30,6 @@ web/e2e/.auth/
 Thumbs.db
 .idea/
 .vscode/
+
+# 업로드 원본 임시 보관(UPLOAD_TMP_DIR 기본값)
+var/

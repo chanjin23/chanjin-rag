@@ -297,6 +297,21 @@ class SyncRun(Base):
     stats: Mapped[dict[str, Any]] = jsonb(EMPTY_JSON_OBJECT)
 
 
+class WorkerHeartbeat(Base):
+    """Worker 하트비트(TRD 12.4). Worker가 30초마다 갱신하고 `/health`가 읽는다.
+
+    Worker 이름(기본 `worker`)마다 1행. 시작 시각과 프로세스 정보를 함께 남긴다.
+    """
+
+    __tablename__ = "worker_heartbeats"
+
+    name: Mapped[str] = mapped_column(Text, primary_key=True)
+    started_at: Mapped[datetime] = timestamptz(nullable=False, now=True)
+    heartbeat_at: Mapped[datetime] = timestamptz(nullable=False, now=True)
+    pid: Mapped[int | None] = mapped_column(Integer)
+    info: Mapped[dict[str, Any]] = jsonb(EMPTY_JSON_OBJECT)
+
+
 # ---------------------------------------------------------------------------
 # 5.2 인증
 # ---------------------------------------------------------------------------

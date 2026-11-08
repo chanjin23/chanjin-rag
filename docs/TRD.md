@@ -228,6 +228,7 @@ chanjin-rag/
 | `chunks` | `id`, `document_id`, `seq`, `location jsonb`, `heading_path`, `filename`, `content`, `content_sha256`, `bm25_text`, `token_count`, `embedding halfvec(N)`(NULL 허용, N=`EMBED_DIM`), `embed_model` | 검색 단위. `bm25_text`는 Kiwi 토큰을 공백으로 이은 문자열. `content_sha256`은 임베딩 입력(머리말 포함)의 해시로, 임베딩 재사용에 씀. `filename`은 `documents.filename`의 사본으로, BM25 색인이 한 테이블의 컬럼만 색인할 수 있어 둠(파일 이동 시 함께 갱신) |
 | `jobs` | `id`, `type`, `document_id`, `sha256`, `status`, `priority`, `attempts`, `run_after`, `locked_at`, `last_error` | `type`: `extract`, `index`, `embed`. `status`: `queued`, `running`, `done`(버전이 바뀌어 결과를 버린 경우 포함), `failed`(재시도 초과). `priority`는 파일 수정 시각(`timestamptz`). `sha256`은 작업 대상 버전으로, 끝날 때 문서의 현재 해시와 다르면 결과를 버림 |
 | `embed_quota` | `day date`(PK), `used int`, `chunks_used int` | 한국 시간 기준 날짜별 사용량(파일 수, 청크 수). 새 날짜 행이 생기면 자연스럽게 초기화 |
+| `worker_heartbeats` | `name`(PK), `started_at`, `heartbeat_at`, `pid`, `info jsonb` | Worker 하트비트(12.4). Worker가 30초마다 갱신하고 `/health`가 읽음 |
 | `sync_runs` | `id`, `source`(`schedule`·`web`·`cli`), `started_at`, `finished_at`, `heartbeat_at`, `status`(`running`·`succeeded`·`failed`·`abandoned`), `stats jsonb` | 동기화 실행 이력. 웹의 상태 화면이 사용. `stats`에 업로드 수, 지원하지 않는 형식으로 건너뛴 수, 읽지 못한 폴더, 보류된 삭제 판정을 담음 |
 
 **`location` 예시:** `{"page": 3}`, `{"sheet": "매출", "rows": [2, 41]}`, `{"slide": 7}`, `{"lines": [120, 168]}`
@@ -372,6 +373,18 @@ Worker는 하나의 프로세스에서 작업 루프와 APScheduler를 함께 �
 - 한도 값은 `EMBED_DAILY_FILE_LIMIT` 설정으로 바꿀 수 있습니다.
 
 **재시도:** API 오류(429, 5xx, 타임아웃)는 tenacity로 지수 백오프합니다(최대 5회, 최대 대기 60초). openai SDK 자체 재시도는 끕니다. 끝까지 실패하면 Provider 전용 예외로 바꿉니다: 429 → `RateLimited`, 5xx·타임아웃·연결 실패 → `ProviderUnavailable`, 401·403 → `ProviderAuthError`(NVIDIA는 틀린 키에 403 `Authorization failed`를 돌려줌, 재시도하지 않음). 429가 계속되면 해당 작업을 `run_after`를 30분 뒤로 미뤄 반납합니다. LLM 스트리밍은 응답 스트림을 여는 데까지만 재시도합니다. 호출마다 `provider.call` 로그(종류, 모델, 지연, 상태 코드, 재시도 횟수. 본문·키 제외)를 남깁니다.
+
+**구현 세부(`backend/app/jobs/`, `backend/app/ingest/{intake,scope,local}.py`)**
+
+- 실행: `rag-backend worker`. 준비 루프(`extract`·`index`, 파싱은 한 번에 하나)와 임베딩 루프(`embed`, API 호출 동시 2개)를 함께 돌립니다. APScheduler는 30초마다 하트비트(`worker_heartbeats`), 1분마다 멈춘 작업 재대기, 매일 0시(한국 시간)에 임베딩 루프를 깨웁니다. 한도는 날짜 키(`embed_quota.day`)가 바뀌어 자연히 초기화됩니다.
+- 접수(업로드와 `ingest-local` 공용): `path_key`로 문서를 찾아, 해시가 같고 `needs_upload`가 아니면 아무것도 하지 않습니다. 새 버전이면 상태를 `queued`로 되돌리고, 임시 원본을 `UPLOAD_TMP_DIR/{document_id}-{sha256}{확장자}`에 두고 `extract`를 등록합니다. 10MB 초과는 원본 없이 파일명 청크만 만듭니다(`meta_only`).
+- 가져갈 때도 작업의 `sha256`이 문서의 현재 해시와 다르면 바로 버립니다(`done`, `job.discarded_stale`). 그래서 지난 버전의 `embed`는 한도를 차감하지 않습니다.
+- 한도가 차면 이미 차감한 버전(429로 반납된 작업 등)만 가져가고, 그것도 없으면 다음 날 0시(한국 시간)까지 쉽니다(`quota.exhausted`, 같은 날·같은 이유는 한 번만 기록). 청크 상한은 차감 여부와 상관없이 새 `embed`를 막습니다.
+- `extract` 결과: 텍스트 0자면 `no_text`, `unsupported_format`이면 `failed`로 기록하고 둘 다 파일명 청크 1개를 만들어 파일명 검색이 되게 합니다(`index` 없음). 그 밖의 파싱 실패는 `sections`만 지우고 사유를 기록합니다. 파싱 중 예외로 재시도할 때 원본이 이미 지워졌으면 `failed`(`parser_error`) + `needs_upload=true`로 다음 동기화 때 다시 받습니다.
+- `embed`는 남은 청크를 32개씩 저장하며, 저장할 때마다 버전을 확인하고 `locked_at`을 갱신합니다. API 요청 크기는 `EMBED_BATCH_SIZE`입니다. API로 보낸 청크 수는 결과를 버리더라도 `chunks_used`에 셉니다.
+- 오류: `RateLimited`·`ProviderAuthError`·`EmbeddingDimensionError`는 `JOB_RATE_LIMIT_DELAY_MINUTES`(30분) 뒤로, 그 밖의 오류는 1·2·4…분(최대 30분) 뒤로 반납합니다. 시도 횟수(`attempts`, 가져갈 때 1 증가)가 `JOB_MAX_ATTEMPTS`(5)에 닿으면 `failed`입니다. `embed`를 반납하면 문서는 `indexed`(BM25 검색은 계속됨)로 돌아갑니다.
+- 로그: `job.started`, `job.completed`(단계별 개수: 섹션·청크·재사용·임베딩 수), `job.failed`(오류 종류, 최종 여부, 다음 시도 시각), `job.discarded_stale`, `job.requeued_stale`, `quota.exhausted`, `worker.started`/`worker.stopped`. 경로·파일명·본문은 남기지 않고 문서 ID만 남깁니다.
+- 개발·E2E 시드: `rag-backend ingest-local <폴더> [--no-process]`가 Agent 없이 로컬 파일을 같은 접수 경로로 큐에 넣고 처리합니다. 범위 검증(`SYNC_ALLOWED_ROOT` 하위, 고정 제외, `sync_config.excludes`, 지원 확장자)도 같습니다. 테스트·E2E는 `SYNC_ALLOWED_ROOT`를 임시 폴더로 바꿉니다(`ingest.local.started`, `ingest.local.completed`).
 
 ### 6.3 청킹과 임베딩
 
@@ -756,6 +769,12 @@ web/src/
 | `RERANK_ENABLED` | `true` | 평가 결과로 결정 |
 | `EMBED_DAILY_FILE_LIMIT` | `100` | |
 | `EMBED_DAILY_CHUNK_LIMIT` | `0`(제한 없음) | 13장 3번 실측 후 확정(6.2) |
+| `SYNC_ALLOWED_ROOT` | `C:\Chanjin\dev` | 수집 허용 최상위 폴더(PRD 3장). 고정 제외 `/project/`, `/backup/`의 기준. 테스트·E2E는 임시 폴더 |
+| `UPLOAD_TMP_DIR` | (비움: 저장소 `var/tmp`) | 업로드 원본 임시 보관(3.2 `tmp` 볼륨). 추출 후 삭제 |
+| `JOB_MAX_ATTEMPTS` | `5` | 작업 재시도 상한(6.2) |
+| `JOB_STALE_LOCK_MINUTES` | `10` | `locked_at`이 이만큼 지난 `running` 작업은 다시 대기열로 |
+| `JOB_RATE_LIMIT_DELAY_MINUTES` | `30` | 429가 계속될 때 작업을 미루는 시간 |
+| `WORKER_POLL_SECONDS` | `5` | 빈 큐 확인 간격 |
 | `PARSER_TIMEOUT_SECONDS` | `60` | 파서 하위 프로세스 시간 상한(초, 3.4) |
 | `PARSER_MEMORY_LIMIT_MB` | `1024` | 파서 하위 프로세스 메모리 상한(MB, 0이면 없음, 3.4) |
 | `EMBED_BATCH_SIZE` | `1` | 무료 엔드포인트는 묶음 요청에 500(13장 실측). 유료·자체 호스팅이면 32 |

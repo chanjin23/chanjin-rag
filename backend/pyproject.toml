@@ -25,6 +25,8 @@ dependencies = [
     "charset-normalizer>=3.3",
     "kiwipiepy>=0.21",
     "tiktoken>=0.8",
+    "apscheduler>=3.10,<4",
+    "tzdata>=2024.1",
 ]
 
 [project.scripts]

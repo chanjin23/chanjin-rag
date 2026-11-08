@@ -32,6 +32,10 @@ uv run rag-backend create-user <아이디>
 cd backend
 uv run uvicorn app.main:app --reload
 
+#    Ingestion Worker(작업 큐 + 하루 임베딩 한도): uv run rag-backend worker
+#    로컬 폴더를 Agent 없이 넣어 처리(개발용, SYNC_ALLOWED_ROOT 하위만):
+#    uv run rag-backend ingest-local <폴더>
+
 # 5) 웹 (http://127.0.0.1:5173, /api는 백엔드로 프록시)
 cd web
 corepack pnpm install
