@@ -81,3 +81,13 @@ def check_scope(path: str, allowed_root: str, excludes: Iterable[str] = ()) -> S
 def is_upload_extension(filename: str) -> bool:
     dot = filename.rfind(".")
     return dot >= 0 and filename[dot:].lower() in UPLOAD_EXTENSIONS
+
+
+def in_roots(path: str, roots: Iterable[str]) -> bool:
+    """`sync_config.roots` 중 하나의 하위(또는 그 자신)인지. 비교 기준은 `relative_path`와 같다."""
+    return any(relative_path(path, root) is not None for root in roots)
+
+
+def under_any(path: str, folders: Iterable[str]) -> bool:
+    """`folders`(폴더 또는 파일 경로) 중 하나와 같거나 그 아래인지(Agent `scan_errors` 판정용)."""
+    return any(relative_path(path, folder) is not None for folder in folders)

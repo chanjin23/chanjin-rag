@@ -23,3 +23,6 @@ export const STORAGE_STATE = path.resolve(import.meta.dirname, ".auth", "user.js
 /** 테스트 DB(ParadeDB :5433). scripts/verify.sh가 띄우고 TEST_DATABASE_URL을 넘긴다. */
 export const TEST_DATABASE_URL =
   process.env.TEST_DATABASE_URL ?? "postgresql+psycopg://rag:rag@127.0.0.1:5433/rag_test";
+
+/** 업로드 원본 임시 폴더(E2E 백엔드와 `rag-backend ingest-local`이 함께 씀). */
+export const UPLOAD_TMP_DIR = path.resolve(import.meta.dirname, ".tmp", "uploads");

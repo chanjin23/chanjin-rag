@@ -175,3 +175,24 @@ async def api_client(session: AsyncSession) -> AsyncIterator[httpx.AsyncClient]:
             yield client
     finally:
         app.dependency_overrides.pop(get_session, None)
+
+
+@pytest.fixture
+async def sync_client(
+    api_client: httpx.AsyncClient,
+    session: AsyncSession,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> httpx.AsyncClient:
+    """Sync API용 클라이언트(Agent Bearer 토큰). 업로드 임시 폴더는 테스트의 `tmp_path/uploads`.
+
+    수집 허용 폴더는 기본값(운영 경로)과 마이그레이션의 `sync_config` 초기값을 그대로 쓴다.
+    경로는 문자열로만 검사하므로 실제 폴더가 없어도 된다.
+    """
+    from app.core import auth
+
+    monkeypatch.setenv("UPLOAD_TMP_DIR", str(tmp_path / "uploads"))
+    get_settings.cache_clear()
+    _, raw = await auth.create_api_token(session, "pytest-agent")
+    api_client.headers["Authorization"] = f"Bearer {raw}"
+    return api_client

@@ -32,7 +32,7 @@ PRD에서 정한 기능을 어떤 기술로, 어떤 구조로 만들지 정한 �
 | --- | --- | --- |
 | 언어 | Python 3.12, TypeScript | 백엔드·Agent·평가는 Python, 웹은 TypeScript |
 | 패키지 | uv(workspace, lock 파일), pnpm | |
-| API 서버 | FastAPI, Uvicorn, Pydantic v2, pydantic-settings | 설정은 환경 변수와 저장소 루트의 `.env` 하나에서 읽습니다(실행 위치와 무관) |
+| API 서버 | FastAPI, Uvicorn, Pydantic v2, pydantic-settings, python-multipart(Sync 업로드) | 설정은 환경 변수와 저장소 루트의 `.env` 하나에서 읽습니다(실행 위치와 무관) |
 | SSE | sse-starlette | 답변 스트리밍 |
 | DB | PostgreSQL 17(ParadeDB 공식 이미지), pgvector, pg\_search | 벡터, BM25, 필터를 SQL 하나로 처리 |
 | DB 접근 | SQLAlchemy 2.0(async), psycopg 3, Alembic | Hybrid 검색 SQL은 직접 작성 |
@@ -188,6 +188,7 @@ chanjin-rag/
 │  │  ├─ query/             # LangGraph 그래프, 노드, 프롬프트
 │  │  ├─ providers/         # LLM, Embedding, Reranker 인터페이스와 NVIDIA 구현, Fake 구현
 │  │  ├─ jobs/              # 작업 큐, Worker 루프, 예약 작업
+│  │  ├─ sync/              # Sync API 처리: 실행 기록, manifest 판정, 이동·복사, 업로드 수신
 │  │  └─ cli.py             # create-user, reset-password, create-token, reindex, purge 등
 │  ├─ alembic/
 │  └─ tests/
@@ -339,6 +340,19 @@ sequenceDiagram
 - manifest에는 파일 목록과 함께 `scan_errors`(권한 오류 등으로 읽지 못한 폴더 목록)를 보냅니다.
 - **대량 삭제 보호:** 이번 실행에서 새로 삭제로 판정된 문서가 전체 문서의 20%(`MASS_DELETE_GUARD_RATIO`)를 넘으면 삭제 판정을 모두 보류하고, `sync_runs.stats`에 기록해 동기화 화면에 경고를 띄웁니다. 사용자가 화면에서 "삭제 판정 적용"을 누르면 다음 실행 때 적용합니다.
 - 업로드 시 서버가 다시 계산한 해시가 manifest와 다르면(업로드 사이에 파일이 바뀜) 저장하지 않고 `hash_mismatch`로 응답합니다. Agent는 다음 실행에서 자연스럽게 다시 올립니다.
+
+**판정 세부 규칙(구현: `backend/app/sync/manifest.py`)**
+
+- 삭제 판정 대상은 로컬 삭제 표시가 없고 수집 범위 안(허용 폴더 `SYNC_ALLOWED_ROOT` 하위, `sync_config.roots` 하위, 고정 제외·제외 패턴에 걸리지 않음)인 문서입니다. 범위에서 빠진 문서는 설정 저장 때 영구 삭제하므로(6.5) manifest 판정에서는 건드리지 않습니다.
+- 대량 삭제 보호의 비율은 `새 삭제 판정 수 ÷ 판정 전 범위 안 활성 문서 수`이고, 이 값이 `MASS_DELETE_GUARD_RATIO`를 **넘을 때**(같으면 적용) 모두 보류합니다. `stats.deletion_held.mass_delete`에 건수·분모·비율·경로 예시(20개)를, `stats.deletion_held.scan_error`에 읽지 못한 폴더 때문에 보류한 건수를 남깁니다.
+- 이동·복사의 원본은 같은 해시·**같은 확장자**의 문서 중 로컬 삭제 표시가 없는 것, ID가 작은 것부터 고릅니다. 확장자가 바뀌면(`.txt`→`.md`) 파서가 달라지고 임시 원본 이름(`{document_id}-{sha256}{ext}`)도 달라지므로 업로드로 판정합니다. 로컬 삭제 표시된 문서가 새 경로로 이동하면 표시도 해제합니다(`moved`와 `restored`에 함께 나옴).
+- 옛 경로가 `scan_errors` 아래인 문서는 이동 원본으로 고르지 않습니다. 읽지 못했을 뿐 사라진 것이 아니므로, 새 경로는 복사(추출이 끝났으면) 또는 업로드로 판정하고 옛 문서는 그대로 둡니다.
+- 이동은 `path`·`path_key`·`filename`·`ext`와 청크의 `filename`, 파일명 청크(`meta_only`·`no_text`·미지원 형식)의 내용·BM25 토큰을 바꿉니다. `content_sha256`은 저장된 임베딩의 실제 입력 해시이므로 그대로 둡니다.
+- 복사는 원본이 추출을 끝낸 경우(대기·추출 중이 아님, `needs_upload` 아님)만 합니다. 아니면 업로드로 판정합니다. 원본의 임베딩이 끝났으면(`ready` 등) 벡터까지 복사하므로 API 호출도 한도 사용도 없고, 복사본의 `embed_charged_sha256`은 자기 해시로 둡니다.
+- 원본이 아직 임베딩 전·중(`indexed`·`embedding`)이면 복사할 벡터가 (일부) 없습니다. 복사본은 `indexed` + 일반 `embed` 작업으로 등록하고 `embed_charged_sha256`을 비워 둡니다. 남은 청크를 임베딩하려면 API를 실제로 부르므로 다른 파일과 똑같이 하루 파일 한도를 1 쓰고, 한도가 찼으면 다음 날로 미뤄집니다(한도를 건너뛰게 표시하면 하루 한도를 넘겨 API를 부를 수 있음).
+- `upload`·`meta_only` 판정은 문서를 만들지 않습니다. 업로드나 메타 등록이 올 때 접수하므로, 업로드가 실패하면 다음 manifest에서 다시 `upload`로 나옵니다.
+- 범위 밖·고정 제외·제외 패턴·지원하지 않는 확장자 항목과 같은 경로의 중복 항목은 판정하지 않고 `rejected`(경로, 이유)로 돌려줍니다.
+- 하트비트가 `SYNC_RUN_STALE_MINUTES` 넘게 없는 `running` 실행은 Worker의 APScheduler(1분 간격)가 `abandoned`로 바꿉니다. 그 뒤 하트비트가 다시 오면(PC가 절전에서 깨어남) `running`으로 되돌립니다.
 
 **Agent 쪽 규칙**
 
@@ -617,6 +631,17 @@ NVIDIA API 실측값(13장)이 예산을 넘으면 rewrite 생략 조건을 넓�
 | POST | `/sync/runs/{id}/complete` | 실행 종료와 통계 |
 | GET | `/sync/backups/latest` | 최신 백업 목록(파일명, 크기, SHA-256) |
 | GET | `/sync/backups/{name}` | 백업 파일 다운로드 |
+
+- 응답 세부(구현: `backend/app/api/sync.py`):
+  - `GET /sync/config`: `allowed_root`, `roots`, `excludes`(`[{pattern, fixed}]`, 고정 제외가 `fixed: true`로 앞에 옴), `max_file_mb`, `extensions`.
+  - `POST /sync/runs`: 201, `{run_id, status, started_at, heartbeat_at, finished_at}`. 하트비트·완료도 같은 형식.
+  - manifest 요청: `{files: [{path, size, mtime, sha256}], scan_errors: [경로]}`. 응답: 경로 목록 `upload`, `meta_only`, `deleted`, `restored`, `deletion_held`, `scan_error_held`(읽지 못한 폴더 아래라 보류), `{from, to}` 목록 `moved`, `copied`, `rejected`(`[{path, reason}]`), `counts`(종류별 건수와 `unchanged`).
+  - 완료 요청: `{status: succeeded|failed, stats, error?}`. `stats`는 그대로 저장하되 서버가 판정 때 남긴 `manifest`, `deletion_held` 키는 덮지 않습니다.
+  - `POST /sync/files/meta` 요청: `{files: [{path, size, mtime, sha256}]}`. 응답: `accepted`(`[{path, document_id, outcome}]`), `rejected`(`max_file_mb` 이하면 `not_over_limit`).
+  - 업로드 요청은 선택 필드 `run_id`를, 메타 등록 요청은 선택 키 `run_id`를 받습니다. 로그 상관 키로만 씁니다.
+  - 업로드 응답: `{document_id, outcome: queued|unchanged}`. 받는 중에는 `UPLOAD_TMP_DIR`의 임시 파일(`incoming-*.part`)에 쓰고, 검증이 끝나면 `{document_id}-{sha256}{ext}`로 옮겨 `extract` 작업을 등록합니다.
+- 오류 코드: 404 `run_not_found`, 409 `run_finished`(끝난 실행), 400 `outside_root`·`fixed_exclude`·`excluded`·`relative_path`·`unsupported_extension`·`invalid_sha256`, 413 `file_too_large`, 409 `hash_mismatch`.
+- 로그(경로·파일명 없이 건수와 ID만, 업로드 관련 로그는 `run_id`와 해시 앞 8자리 `sha256_prefix`를 함께 남김): `sync.run.started`, `sync.manifest.judged`, `sync.deletion.held`(`reason`: `mass_delete_guard`·`scan_error`), `sync.file.uploaded`, `sync.file.rejected`, `sync.file.hash_mismatch`, `sync.file.meta_registered`, `sync.run.completed`, `sync.run.abandoned`, `sync.run.resumed`.
 
 ### 8.3 웹 API (세션)
 

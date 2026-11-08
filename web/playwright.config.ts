@@ -6,6 +6,7 @@ import {
   BACKEND_LOG,
   STORAGE_STATE,
   TEST_DATABASE_URL,
+  UPLOAD_TMP_DIR,
   WEB_PORT,
   WEB_URL,
 } from "./e2e/env";
@@ -25,6 +26,9 @@ if (process.env.LOOP_REPORT_DIR) {
  * - LOG_QUERY_TEXT=true: 질문 원문을 로그에 남겨, 테스트가 이번 요청의 로그 줄을 찾을 수 있게 한다.
  * - LOG_FORMAT=json + LOG_FILE: 테스트가 읽는 JSON 로그 파일(e2e/backendLog.ts).
  * - SESSION_COOKIE_SECURE=false: E2E는 로컬 HTTP라 Secure 쿠키를 끈다(운영은 항상 Secure).
+ * - UPLOAD_TMP_DIR: Sync 업로드 원본 임시 폴더. `ingest-local`(Worker 처리)과 같은 폴더를 써서
+ *   E2E가 업로드한 파일을 CLI로 처리할 수 있게 한다. SYNC_ALLOWED_ROOT는 기본값(운영과 같은 경로
+ *   문자열)을 그대로 쓴다. Sync API는 경로를 문자열로만 검사한다.
  */
 const BACKEND_ENV = {
   APP_ENV: "test",
@@ -34,6 +38,7 @@ const BACKEND_ENV = {
   LOG_FILE: BACKEND_LOG,
   DATABASE_URL: TEST_DATABASE_URL,
   SESSION_COOKIE_SECURE: "false",
+  UPLOAD_TMP_DIR,
   PYTHONUNBUFFERED: "1",
 };
 

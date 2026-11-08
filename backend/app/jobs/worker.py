@@ -6,7 +6,8 @@
 - 임베딩 루프: `embed`를 하루 한도 안에서 처리(API 호출 동시 2개는 `JobRunner`가 지킴).
   한도에 닿으면 다음 날 0시(한국 시간)까지 쉰다. 그 사이에도 1분마다 이미 차감한 버전
   (429로 반납된 작업)이 있는지 확인한다.
-- APScheduler: 30초마다 하트비트(`worker_heartbeats`), 1분마다 멈춘 작업 재대기,
+- APScheduler: 30초마다 하트비트(`worker_heartbeats`), 1분마다 멈춘 작업 재대기와
+  하트비트가 끊긴 동기화 실행의 `abandoned` 처리(`SYNC_RUN_STALE_MINUTES`),
   매일 0시(한국 시간)에 임베딩 루프를 깨운다. 한도는 날짜 키가 바뀌어 자연히 초기화된다.
 """
 
@@ -23,6 +24,7 @@ from app.core.logging import get_logger
 from app.db.models import WorkerHeartbeat
 from app.jobs.quota import QuotaExhausted, quota_tz
 from app.jobs.runner import PREP_TYPES, JobRunner
+from app.sync.runs import abandon_stale_runs
 
 log = get_logger(__name__)
 
@@ -97,6 +99,14 @@ class Worker:
 
         await self._safe("requeue_stale", run())
 
+    async def abandon_stale_sync_runs(self) -> list[int]:
+        stale_after = timedelta(minutes=self.runner.settings.sync_run_stale_minutes)
+        async with self.sessionmaker() as s, s.begin():
+            return await abandon_stale_runs(s, now=self.runner.clock(), stale_after=stale_after)
+
+    async def _sync_runs_job(self) -> None:
+        await self._safe("abandon_stale_sync_runs", self.abandon_stale_sync_runs())
+
     async def _midnight_job(self) -> None:
         log.info("quota.day_started")
         self._embed_wake.set()
@@ -135,13 +145,28 @@ class Worker:
             else:
                 await self.runner.run(claimed)
 
+    def build_scheduler(self) -> AsyncIOScheduler:
+        """예약 작업을 등록한 스케줄러(시작 전). 작업 ID로 테스트가 등록 여부를 확인한다."""
+        scheduler = AsyncIOScheduler(timezone=quota_tz())
+        scheduler.add_job(
+            self._heartbeat_job, "interval", seconds=HEARTBEAT_SECONDS, id="heartbeat"
+        )
+        scheduler.add_job(
+            self._stale_job, "interval", seconds=STALE_CHECK_SECONDS, id="requeue_stale"
+        )
+        scheduler.add_job(
+            self._sync_runs_job,
+            "interval",
+            seconds=STALE_CHECK_SECONDS,
+            id="abandon_stale_sync_runs",
+        )
+        scheduler.add_job(self._midnight_job, "cron", hour=0, minute=0, id="quota_midnight")
+        return scheduler
+
     async def run(self) -> None:
         """`stop()`이 불릴 때까지 돈다."""
         await self._register()
-        scheduler = AsyncIOScheduler(timezone=quota_tz())
-        scheduler.add_job(self._heartbeat_job, "interval", seconds=HEARTBEAT_SECONDS)
-        scheduler.add_job(self._stale_job, "interval", seconds=STALE_CHECK_SECONDS)
-        scheduler.add_job(self._midnight_job, "cron", hour=0, minute=0)
+        scheduler = self.build_scheduler()
         scheduler.start()
         settings = self.runner.settings
         log.info(
@@ -154,6 +179,7 @@ class Worker:
         )
         try:
             await self.runner.requeue_stale()
+            await self._sync_runs_job()
             await asyncio.gather(self._prep_loop(), self._embed_loop())
         finally:
             scheduler.shutdown(wait=False)
