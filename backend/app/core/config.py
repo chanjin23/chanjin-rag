@@ -67,6 +67,12 @@ class Settings(BaseSettings):
     )
     rerank_enabled: bool = True
 
+    # 질의(TRD 7.1, 7.3). 전체 시간 상한(초)을 넘으면 `timeout` 오류로 끝낸다
+    chat_timeout_seconds: float = 60.0
+    # Fake LLM 조각 사이 지연(ms, PROVIDER=fake 전용).
+    # E2E에서 단계 표시를 화면으로 확인할 수 있게 늦춘다
+    fake_llm_token_delay_ms: int = 0
+
     # 수집
     embed_daily_file_limit: int = 100
     embed_daily_chunk_limit: int = 0  # 0이면 제한 없음(TRD 6.2)

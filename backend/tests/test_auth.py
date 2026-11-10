@@ -241,7 +241,7 @@ async def test_session_sliding_expiry(
     web_session.last_seen_at = auth.utcnow() - timedelta(days=1)
     await session.flush()
     res = await api_client.post(
-        "/api/conversations/c1/messages", json={"text": "안녕"}, headers=CSRF
+        "/api/conversations/new/messages", json={"text": "안녕"}, headers=CSRF
     )
     assert res.status_code == 200
     assert "sid=" in res.headers.get("set-cookie", "")

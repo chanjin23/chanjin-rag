@@ -38,7 +38,7 @@ PRD에서 정한 기능을 어떤 기술로, 어떤 구조로 만들지 정한 �
 | DB 접근 | SQLAlchemy 2.0(async), psycopg 3, Alembic | Hybrid 검색 SQL은 직접 작성 |
 | 작업 큐 | PostgreSQL `jobs` 테이블 + `SELECT … FOR UPDATE SKIP LOCKED` | 별도 브로커 없음 |
 | 예약 작업 | APScheduler(Worker 안) | 자정 한도 초기화, 매일 백업, 로컬 삭제 문서 영구 삭제, 끊긴 동기화 실행 정리, 오래된 임시 파일 정리 |
-| 질의 흐름 | LangGraph | LangChain 체인과 래퍼는 쓰지 않고 Provider를 직접 호출 |
+| 질의 흐름 | LangGraph(1.x) | LangChain 체인과 래퍼는 쓰지 않고 Provider를 직접 호출. 의존하는 `uuid-utils`는 0.19의 네이티브 DLL을 개발 PC의 Windows 애플리케이션 제어 정책이 막아 `<0.19`로 제한(루트 `pyproject.toml`의 `constraint-dependencies`) |
 | 모델 호출 | openai SDK 2.x(`base_url`=NVIDIA), httpx, tenacity | 재정렬은 OpenAI 호환이 아니어서 httpx로 호출. openai 3.x는 httpx 대신 httpx2를 써서 2.x로 고정 |
 | 한국어 형태소 | kiwipiepy | BM25용 사전 토큰화 |
 | 토큰 수 계산 | tiktoken(o200k\_base) 근사 | 청크 길이 기준. 실제 한도는 API의 `truncate=END`로 보호 |
@@ -469,7 +469,9 @@ Worker는 하나의 프로세스에서 작업 루프와 APScheduler를 함께 �
 
 ```mermaid
 flowchart TD
-    START([질문]) --> REWRITE["rewrite<br/>독립 질문, 키워드 질의, 의도 분류"]
+    START([질문]) --> SCOPE["scope<br/>필터 적용 문서 수 확인"]
+    SCOPE -- "0개" --> LOG
+    SCOPE --> REWRITE["rewrite<br/>독립 질문, 키워드 질의, 의도 분류"]
     REWRITE -- "intent=qa" --> RETRIEVE["retrieve<br/>질문 임베딩 + Hybrid SQL"]
     REWRITE -- "intent=summarize" --> SUMMARIZE["summarize<br/>파일 단위 요약"]
     RETRIEVE --> RERANK{"rerank<br/>(설정으로 켜고 끔)"}
@@ -485,6 +487,15 @@ flowchart TD
 
 **그래프 상태(`QueryState`):** `question`, `history`(최근 6턴), `filters`, `rewritten`, `keyword_query`, `intent`, `target_document_id`, `candidates`, `selected`, `grade`, `attempt`, `answer`, `citations`, `timings`
 
+구현(`backend/app/query/`): `graph.py`(그래프, 노드), `prompts.py`(프롬프트), `postprocess.py`(답변 후처리), `summary_target.py`(요약 대상 판정), `fake_llm.py`(Fake LLM 응답기).
+
+- 그래프는 한 번 컴파일해 재사용하고, DB 세션과 Provider는 실행 컨텍스트(`context_schema`)로 넘깁니다. 단계별 지연·후보 점수·판정·모델명은 상태와 별도의 `QueryTrace`에 모읍니다. 중간에 끊기거나 실패해도 그때까지 모은 값으로 질의 로그를 남기기 위해서입니다(`timings`는 `QueryTrace.latency_ms`).
+- `scope`는 그림의 노드 앞에 둔 범위 확인 단계입니다. 필터에 맞는 문서가 0개면 검색하지 않고 안내 문구로 끝냅니다(7.3 순서표대로 `status` 없이 `token` → `done`). 문서를 직접 고른 요약 요청(`summarize_document_id`)은 필터와 상관없이 진행합니다.
+- 프롬프트의 시스템 메시지 첫 줄에 작업 표식(`[작업:rewrite]`, `grade`, `retry_rewrite`, `generate`, `summarize_map`, `summarize_reduce`)을 둡니다. 로그·디버깅에서 호출을 구분하고, Fake LLM 응답기도 이 표식으로 작업마다 결정적인 답을 만듭니다. 자료는 `<자료 번호="n" 파일="…" 위치="…" 수정일="YYYY-MM-DD">…</자료>`로 감싸고, 자료 안의 `<자료`·`</자료` 문자열은 바꿔 넣어 구분자를 깨지 못하게 합니다.
+- 짧은 판단(rewrite, grade, retry\_rewrite)은 `temperature` 0, `max_tokens` 300의 JSON 응답입니다. rewrite·retry\_rewrite는 파싱에 실패하면 원래 질의를 쓰고, grade는 파싱에 실패하면 "충분"으로 보고 생성으로 넘깁니다(생성 단계가 근거 밖 답을 막고 "찾지 못했다"고 말하게 지시되어 있음). 이력이 없을 때의 의도는 질문에 "요약"(summar)이 있는지로 정합니다.
+- 재정렬 뒤 상위 8개를 고를 때도 문서당 최대 3개를 지킵니다. 재정렬 호출이 실패하면 RRF 순서로 계속합니다.
+- 요약은 문서의 sections(없으면 chunks)를 8,000자 부분으로 묶습니다. 부분이 1개면 바로 요약하고, 여러 개면 부분 요약(map) 후 합칩니다(reduce). 부분이 12개를 넘으면 이웃한 부분을 묶고 묶음마다 앞 8,000자만 씁니다(`query.summary.truncated` 로그).
+
 | 노드 | 입력 → 출력 | 구현 메모 |
 | --- | --- | --- |
 | rewrite | 질문·이력 → 독립 질문, 키워드 질의, 의도 | 이력이 없으면 LLM을 부르지 않고 그대로 통과(지연 절약). 출력은 JSON으로 받고, 파싱 실패 시 원문 질문 사용 |
@@ -493,7 +504,7 @@ flowchart TD
 | grade | 상위 청크 → 충분·부족 | 1차는 LLM 판정(짧은 JSON 응답). 지연이 목표를 넘으면 재정렬 점수 임계값으로 바꿉니다 |
 | retry\_rewrite | 판정 사유 → 새 질의 | 동의어, 상위 개념, 키워드 위주로 바꿉니다. 재검색은 1회만 |
 | generate | 선택된 청크 → 답변 | 청크를 `[1]`\~`[k]`로 번호 붙여 넣고, 문장 끝마다 인용 번호를 달게 지시. 근거 밖 지식 사용 금지. 청크는 구분자로 감싸 "자료"로 넣고, 그 안의 지시문은 따르지 않게 지시. 근거끼리 내용이 다르면 각 출처의 수정일을 밝히게 지시. 답변은 질문과 같은 언어로 작성 |
-| summarize | 대상 문서 → 요약 | 대상은 질문에 나온 파일명, 직전 답변의 출처("그 문서"), 출처 패널의 "요약" 버튼 순으로 정합니다. 문서가 길면 sections를 묶어 부분 요약 후 합치기(map-reduce). 대상 판정 규칙은 아래 표 |
+| summarize | 대상 문서 → 요약 | 대상은 출처 패널의 "요약" 버튼이나 후보 목록에서 고른 문서(`summarize_document_id`, 명시적 선택이라 가장 앞), 질문에 나온 파일명(확장자 포함 이름, 없으면 확장자를 뺀 2자 이상 이름), 직전 답변이 인용한 문서("그 문서") 순으로 정합니다. 문서가 길면 sections를 묶어 부분 요약 후 합치기(map-reduce). 대상 판정 규칙은 아래 표 |
 | not\_found | → 고정 응답 | "문서에서 찾지 못했습니다"와 함께 현재 검색 범위(`coverage`)와 가장 가까웠던 후보 3개를 참고로 보여줌 |
 | log | 상태 → `query_logs` | 단계별 지연, 후보, 판정, 모델명 저장 |
 
@@ -501,9 +512,9 @@ flowchart TD
 
 | 경우 | 응답 |
 | --- | --- |
-| 후보 1개, 상태 `indexed`·`ready` | 요약 진행 |
+| 후보 1개, 상태 `indexed`·`embedding`·`ready` | 요약 진행(`embedding`도 sections가 있어 요약 가능) |
 | 후보 여러 개 | 요약하지 않고 후보 목록(경로, 수정일)을 보여주며 고르게 함. 고르면 `summarize_document_id`로 다시 요청 |
-| 후보 없음 | "해당 파일을 찾지 못했습니다"와 비슷한 파일명 3개 |
+| 후보 없음 | "해당 파일을 찾지 못했습니다"와 비슷한 파일명 3개(`difflib` 유사도). `done(not_found=true)` |
 | 후보가 `queued`·`extracting` | "아직 처리 중입니다" |
 | 후보가 `meta_only`·`no_text`·`failed` | 요약할 텍스트가 없는 이유(10MB 초과, 텍스트 없음, 실패 사유)를 안내 |
 
@@ -588,9 +599,9 @@ LIMIT 30;
 | 이벤트 | 데이터 | 시점 |
 | --- | --- | --- |
 | `status` | `{"stage": "rewriting" \| "searching" \| "reranking" \| "grading" \| "retrying" \| "summarizing" \| "generating", "progress"?: {"done", "total"}}` | 노드 시작 시. `progress`는 요약의 부분 요약 진행률에만 씀 |
-| `sources` | `[{"n": 1, "chunk_id", "document_id", "path", "location", "mtime", "snippet", "locally_deleted"}]` | 생성 직전(출처 패널을 먼저 채움) |
+| `sources` | `[{"n": 1, "chunk_id", "document_id", "path", "location", "mtime", "snippet", "locally_deleted"}]` | 생성 직전(출처 패널을 먼저 채움). 인용 번호가 없는 참고 후보·요약 후보는 `n: null`, 문서 단위 출처(요약)는 `chunk_id: null` |
 | `token` | `{"text": "..."}` | 생성 중 |
-| `done` | `{"message_id", "not_found", "coverage", "latency_ms"}` | 완료 |
+| `done` | `{"message_id", "conversation_id", "not_found", "coverage", "latency_ms"}` | 완료. `latency_ms`는 전체 지연(정수 ms), 단계별 지연은 질의 로그에 |
 | `error` | `{"code", "message", "retryable"}` | 실패 |
 
 **경우별 이벤트 순서**
@@ -602,6 +613,8 @@ LIMIT 30;
 | 필터 결과 0개, 문서 0개 | `token`(안내 문구) → `done(not_found=true, coverage)` |
 | 요약 | `status(summarizing, progress)`(여러 번) → `sources`(대상 문서) → `token` → `done` |
 | 요약 대상 여러 개 | `sources`(후보 문서들) → `token`(고르라는 안내) → `done` |
+| 요약 대상이 처리 중·텍스트 없음 | `sources`(대상 문서) → `token`(이유 안내) → `done` |
+| 요약 대상 없음 | `token`(비슷한 파일명 안내) → `done(not_found=true)` |
 | 실패 | 어느 시점에서든 `error`로 끝남. 이미 보낸 토큰은 `status=error`로 저장 |
 
 **오류 코드**
@@ -615,7 +628,11 @@ LIMIT 30;
 | `conflict` | 같은 대화에서 이미 생성 중 | false | 이전 답변이 끝난 뒤 다시 보내세요 |
 | `internal` | 그 밖의 서버 오류 | true | 문제가 발생했습니다 |
 
-- 노드 이벤트와 토큰은 LangGraph의 스트리밍(`astream`의 custom·messages 모드)으로 받아 SSE로 바꿉니다.
+- 노드 이벤트와 토큰은 LangGraph의 스트리밍(`astream`의 custom 모드, 노드가 `get_stream_writer()`로 씀)으로 받아 SSE로 바꿉니다. LangChain 채팅 모델을 쓰지 않으므로 messages 모드는 쓰지 않습니다. 그래프는 별도 작업(task)에서 돌고 이벤트는 큐로 SSE에 넘깁니다.
+- 경로의 `{id}`가 `new`면 대화를 새로 만듭니다(제목은 질문 앞 40자). 숫자가 아니거나 없는 대화면 404 `conversation_not_found`. 같은 대화의 동시 요청은 대화 행 `FOR UPDATE`로 줄 세웁니다.
+- 저장: 질문을 받으면 사용자 메시지(`complete`)와 답변 메시지(`streaming`)를 먼저 저장하고, 끝나면 답변과 `citations`(보낸 `sources` 그대로)를 `complete`로 바꿉니다. 실패·중단에도 질의 로그를 남깁니다.
+- 질문 전체 시간 상한은 `CHAT_TIMEOUT_SECONDS`(60초)입니다. 오류 이벤트와 409 응답 본문에는 `retryable`이 함께 있습니다.
+- 로그: `chat.message.received`(대화·메시지 ID, 길이, 이력 수, 필터 이름), `chat.message.completed`·`chat.message.not_found`(출처·인용 수, 판정, 재검색 여부, 검색 범위 숫자, 지연), `chat.message.failed`(`code`, 예외 이름), `chat.message.aborted`, `chat.message.conflict`, `chat.message.stale_aborted`. 질문·답변 원문은 남기지 않습니다(`LOG_QUERY_TEXT=true`일 때만 `received`에 질문).
 - Nginx는 이 경로에서 `proxy_buffering off`를 적용하고, 응답에 `X-Accel-Buffering: no`를 붙입니다.
 - 클라이언트가 연결을 끊으면 생성을 중단하고, 그때까지의 답변을 `status=aborted`로 저장합니다.
 - 같은 대화에 `status=streaming`인 메시지가 있으면 새 질문은 SSE를 시작하지 않고 HTTP 409(`conflict`)로 거절합니다. 2분 넘게 `streaming`인 메시지는 `aborted`로 정리합니다.
@@ -693,7 +710,7 @@ NVIDIA API 실측값(13장)이 예산을 넘으면 rewrite 생략 조건을 넓�
 | GET | `/documents/suggest` | 경로 앞부분 → 폴더 경로 후보(디렉터리 필터 자동완성) | F-07 |
 | GET·POST | `/conversations` | 대화 목록·생성 | F-11 |
 | GET·PATCH·DELETE | `/conversations/{id}` | 대화와 메시지 조회, 제목 변경, 삭제 | F-11 |
-| POST | `/conversations/{id}/messages` | 질문(`text`, `filters`, `summarize_document_id?`) → SSE 응답. 생성 중이면 409 | F-07\~F-09 |
+| POST | `/conversations/{id}/messages` | 질문(`text`, `filters`, `summarize_document_id?`) → SSE 응답. 생성 중이면 409. `{id}`가 `new`면 대화를 만듦. `filters`: `directory`, `exts`, `modified_from`·`modified_to`(날짜, 한국 시간 그날 시작·끝), `include_deleted` | F-07\~F-09 |
 | PUT | `/messages/{id}/feedback` | 좋아요·싫어요, 사유, 메모(다시 보내면 덮어씀). 실패 유형은 검토 화면에서 따로 붙임 | F-12 |
 | GET | `/eval/runs`, `/eval/runs/{id}` | 평가 실행 목록, 지표, 이전 실행과 비교 | F-13 |
 | GET | `/health` | DB 연결, Worker 마지막 하트비트, 디스크 여유, NVIDIA API 마지막 성공·실패 시각과 오류 코드 | 운영 |
@@ -859,6 +876,8 @@ web/src/
 | `MASS_DELETE_GUARD_RATIO` | `0.2` | 한 번에 이 비율을 넘는 삭제 판정은 보류(6.1) |
 | `SYNC_RUN_STALE_MINUTES` | `10` | 하트비트가 끊긴 동기화 실행을 `abandoned`로 바꾸는 시간 |
 | `LOG_QUERY_TEXT` | `false` | 앱 로그에 질문 원문 기록 여부(개발·E2E 전용) |
+| `CHAT_TIMEOUT_SECONDS` | `60` | 질의 하나의 전체 시간 상한(7.3 `timeout`) |
+| `FAKE_LLM_TOKEN_DELAY_MS` | `0` | `PROVIDER=fake` 전용. Fake LLM 조각 사이 지연. E2E는 150으로 두어 단계 표시를 화면에서 확인 |
 | `APP_ENV` | `dev` | `dev` \| `prod` \| `test`. 프로세스 환경 변수로 `test`를 주면 `.env`를 읽지 않고 NVIDIA 키를 비웁니다(pytest·E2E) |
 | `PROVIDER` | `nvidia` | `nvidia` \| `fake`. `fake`는 결정적인 가짜 구현(14장). `APP_ENV=test`에서는 `fake`만 허용 |
 | `DATABASE_URL` | `postgresql+psycopg://rag:rag@localhost:5432/rag` | 테스트·E2E는 `TEST_DATABASE_URL`(테스트 DB, 5433)을 씁니다 |

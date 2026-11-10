@@ -20,7 +20,12 @@ def _secret(value: SecretStr | None) -> str | None:
 def create_llm_provider(settings: Settings | None = None) -> LLMProvider:
     s = settings or get_settings()
     if s.provider == "fake":
-        return FakeLLMProvider()
+        # 질의 그래프의 프롬프트(재작성·판정·생성·요약)에 결정적으로 답한다(E2E, 개발)
+        from app.query.fake_llm import fake_query_responder
+
+        return FakeLLMProvider(
+            responder=fake_query_responder, token_delay=s.fake_llm_token_delay_ms / 1000
+        )
     return NvidiaLLMProvider(
         api_key=_secret(s.nvidia_llm_api_key),
         model=s.llm_model,

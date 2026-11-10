@@ -29,6 +29,8 @@ if (process.env.LOOP_REPORT_DIR) {
  * - UPLOAD_TMP_DIR: Sync 업로드 원본 임시 폴더. `ingest-local`(Worker 처리)과 같은 폴더를 써서
  *   E2E가 업로드한 파일을 CLI로 처리할 수 있게 한다. SYNC_ALLOWED_ROOT는 기본값(운영과 같은 경로
  *   문자열)을 그대로 쓴다. Sync API는 경로를 문자열로만 검사한다.
+ * - FAKE_LLM_TOKEN_DELAY_MS: Fake LLM 조각 사이 지연. 질의 단계 표시("답변 작성 중" 등)가 화면에
+ *   잠깐이라도 머물러 테스트가 확인할 수 있게 한다.
  */
 const BACKEND_ENV = {
   APP_ENV: "test",
@@ -39,6 +41,7 @@ const BACKEND_ENV = {
   DATABASE_URL: TEST_DATABASE_URL,
   SESSION_COOKIE_SECURE: "false",
   UPLOAD_TMP_DIR,
+  FAKE_LLM_TOKEN_DELAY_MS: "150",
   PYTHONUNBUFFERED: "1",
 };
 

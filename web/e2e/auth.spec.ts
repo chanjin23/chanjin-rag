@@ -65,7 +65,8 @@ test("로그인하면 채팅 화면으로 이동한다", async ({ page, context 
 });
 
 test("세션이 만료되면 입력 중인 질문이 보존된다", async ({ page, context }) => {
-  const conversation = `e2e-expiry-${Date.now()}`;
+  // 새 대화(`new`)로 보내는 화면. 대화 ID는 첫 답변이 끝나면 백엔드가 정한다(T10)
+  const conversation = "new";
   const question = `세션 만료 뒤에도 남아야 하는 질문 #${Date.now()}`;
 
   await page.goto(`/c/${conversation}`);
@@ -110,15 +111,22 @@ test("세션이 만료되면 입력 중인 질문이 보존된다", async ({ pag
   await expect(input).toHaveValue(question);
   await waitForBackendLog((r) => r.event === "auth.login.succeeded", { since });
 
-  // 4) 그대로 보내면 정상 처리된다
+  // 4) 그대로 보내면 정상 처리된다(질의 그래프가 끝까지 돌아 답변이 완료된다)
   await input.press("Enter");
-  await expect(page.getByText(`백엔드가 질문을 받았습니다: ${question}`)).toBeVisible();
+  await expect(page.getByText(question, { exact: true })).toBeVisible();
   await expect(input).toHaveValue("");
+  await expect(page.getByText(/^\d+ms$/)).toBeVisible({ timeout: 10_000 });
   const received = await waitForBackendLog(
     (r) => r.event === "chat.message.received" && r.text === question,
     { since },
   );
-  expect(received.conversation_id).toBe(conversation);
+  expect(typeof received.conversation_id).toBe("number");
+  await waitForBackendLog(
+    (r) =>
+      (r.event === "chat.message.completed" || r.event === "chat.message.not_found") &&
+      r.message_id === received.message_id,
+    { since },
+  );
 
   // 보낸 뒤에는 보존본을 지운다(새로고침해도 다시 채우지 않음)
   await page.reload();

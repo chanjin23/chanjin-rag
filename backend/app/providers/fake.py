@@ -3,8 +3,10 @@
 - 외부 호출이 없고, 같은 입력에는 항상 같은 결과를 낸다.
 - 임베딩: 토큰 해시(feature hashing) 기반 단위 벡터. 같은 텍스트 → 같은 벡터이고,
   토큰을 많이 공유하는 텍스트끼리 코사인 유사도가 높아 검색 테스트에도 쓸 수 있다.
-- LLM: 고정 규칙(부분 문자열 → 답변)으로 답하고, 규칙이 없으면 마지막 질문을 되풀이한다.
+- LLM: `responder`(메시지 → 답변 또는 None)가 있으면 먼저 쓰고,
+  그다음 고정 규칙(부분 문자열 → 답변), 둘 다 없으면 마지막 질문을 되풀이한다.
   답변은 공백을 보존한 단어 조각으로 스트리밍한다.
+  질의 그래프의 프롬프트별 결정적 응답기는 `app.query.fake_llm`에 있다(팩토리가 붙인다).
 - 재정렬: 질문 토큰 중 passage에 들어 있는 비율(토큰 겹침 점수).
 """
 
@@ -12,7 +14,7 @@ import asyncio
 import hashlib
 import math
 import re
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
 
 from app.providers.base import ChatMessage, InputType, RerankResult
@@ -63,14 +65,22 @@ class FakeEmbeddingProvider:
 
 @dataclass
 class FakeLLMProvider:
-    """`rules`는 (부분 문자열, 답변) 목록. 마지막 user 메시지에 처음 맞는 규칙의 답변을 쓴다."""
+    """`rules`는 (부분 문자열, 답변) 목록. 마지막 user 메시지에 처음 맞는 규칙의 답변을 쓴다.
+
+    `responder`는 메시지 전체를 보고 답을 정하는 함수(None을 돌려주면 규칙으로 넘어간다).
+    """
 
     rules: Sequence[tuple[str, str]] = ()
     token_delay: float = 0.0
     model: str = FAKE_LLM_MODEL
     calls: list[list[ChatMessage]] = field(default_factory=list)
+    responder: Callable[[Sequence[ChatMessage]], str | None] | None = None
 
     def answer_for(self, messages: Sequence[ChatMessage]) -> str:
+        if self.responder is not None:
+            reply = self.responder(messages)
+            if reply is not None:
+                return reply
         question = next((m.content for m in reversed(messages) if m.role == "user"), "")
         for needle, reply in self.rules:
             if needle in question:

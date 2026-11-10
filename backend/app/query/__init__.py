@@ -1,1 +1,1 @@
-"""질의 그래프 (LangGraph): rewrite → retrieve → rerank → grade → generate (TRD 7장)."""
+"""질의 파이프라인 (TRD 7장): Hybrid 검색(`search`)과 LangGraph 질의 그래프(`graph`)."""

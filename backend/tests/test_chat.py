@@ -1,4 +1,7 @@
+import httpx
+from chat_seed import seed_doc
 from fastapi.testclient import TestClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.main import app
 
@@ -9,19 +12,22 @@ def test_health() -> None:
     assert TestClient(app).get("/api/health").json() == {"status": "ok"}
 
 
-def test_post_message_streams_trd_events_in_order(web_client: TestClient) -> None:
-    with web_client.stream(
-        "POST", "/api/conversations/test/messages", json={"text": "안녕"}
-    ) as res:
-        assert res.status_code == 200
-        assert res.headers["content-type"].startswith("text/event-stream")
-        events = [
-            line.split(":", 1)[1].strip() for line in res.iter_lines() if line.startswith("event:")
-        ]
+async def test_post_message_streams_trd_events_in_order(
+    chat_client: httpx.AsyncClient, session: AsyncSession
+) -> None:
+    """일반 답변: status(여러 번) → sources → token(여러 번) → done (TRD 7.3)."""
+    await seed_doc(session, r"C:\docs\인사.md", ["안녕 인사말은 반갑습니다 이다."])
+    res = await chat_client.post("/api/conversations/new/messages", json={"text": "안녕 인사말"})
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/event-stream")
+    events = [
+        line.split(":", 1)[1].strip() for line in res.text.splitlines() if line.startswith("event:")
+    ]
 
+    first_sources = events.index("sources")
     assert events[0] == "status"
-    assert events[1] == "sources"
-    assert set(events[2:-1]) == {"token"}
+    assert set(events[:first_sources]) == {"status"}
+    assert set(events[first_sources + 1 : -1]) == {"token"}
     assert events[-1] == "done"
 
 

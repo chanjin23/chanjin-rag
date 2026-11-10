@@ -22,6 +22,7 @@ if sys.platform == "win32":
 
 from collections.abc import AsyncIterator, Iterator  # noqa: E402
 from pathlib import Path  # noqa: E402
+from typing import Any  # noqa: E402
 
 import httpx  # noqa: E402
 import psycopg  # noqa: E402
@@ -196,3 +197,38 @@ async def sync_client(
     _, raw = await auth.create_api_token(session, "pytest-agent")
     api_client.headers["Authorization"] = f"Bearer {raw}"
     return api_client
+
+
+# ---------------------------------------------------------------------------
+# 채팅(질의 그래프) API 클라이언트 (TRD 7.3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def providers() -> Any:
+    """채팅 API가 쓸 Fake Provider 묶음. 테스트에서 `providers.llm = …`으로 바꿔 끼울 수 있다."""
+    from chat_seed import fake_embedder, fake_llm, fake_reranker
+
+    from app.api.chat import ChatProviders
+
+    return ChatProviders(llm=fake_llm(), embedder=fake_embedder(), reranker=fake_reranker())
+
+
+@pytest.fixture
+async def chat_client(
+    api_client: httpx.AsyncClient, providers: Any
+) -> AsyncIterator[httpx.AsyncClient]:
+    """로그인된 상태 + 테스트 DB 세션(`session`) + 바꿔 끼울 수 있는 Provider(`providers`)."""
+    from app.api.chat import get_chat_providers
+    from app.api.deps import require_web_user
+    from app.db.models import User
+    from app.main import app
+
+    app.dependency_overrides[require_web_user] = lambda: User(id=1, username="tester")
+    app.dependency_overrides[get_chat_providers] = lambda: providers
+    api_client.headers.update(CSRF_HEADERS)
+    try:
+        yield api_client
+    finally:
+        app.dependency_overrides.pop(require_web_user, None)
+        app.dependency_overrides.pop(get_chat_providers, None)
