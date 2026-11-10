@@ -2,6 +2,8 @@
 
 수집(TRD 6.2): `worker`(Ingestion Worker), `ingest-local <폴더>`(개발·E2E 시드).
 
+검색(TRD 7.2): `search <질문>`(Hybrid 검색 결과와 검색 범위 확인용).
+
 인증(TRD 5.2, 11장): `create-user`, `reset-password`, `create-token`.
 - 비밀번호는 기본으로 화면에 보이지 않게 두 번 묻는다. 스크립트(E2E 등)는 `--password-stdin`으로
   표준 입력 첫 줄을 넘긴다. 명령줄 인자로는 받지 않는다(셸 기록·프로세스 목록에 남지 않게).
@@ -12,8 +14,10 @@ import asyncio
 import signal
 import sys
 from collections.abc import Awaitable, Callable, Coroutine
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, NoReturn
+from zoneinfo import ZoneInfo
 
 import typer
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -230,6 +234,90 @@ def worker(
         _run_async(main)
     except KeyboardInterrupt:
         pass
+
+
+def _parse_when(value: str | None, *, end_of_day: bool) -> datetime | None:
+    """`2026-10-01` 또는 ISO 시각. 시간대가 없으면 한국 시간(TRD 5장). 날짜만 주면 그날 시작·끝."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        _fail(f"날짜 형식이 아닙니다: {value} (예: 2026-10-01)")
+    if len(value) == 10 and end_of_day:
+        parsed = parsed + timedelta(days=1) - timedelta(microseconds=1)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ZoneInfo("Asia/Seoul"))
+    return parsed
+
+
+@app.command("search")
+def search_command(
+    query: Annotated[str, typer.Argument(help="질문(검색어)")],
+    directory: str | None = typer.Option(None, "--dir", help="디렉터리 접두어(하위 폴더 포함)"),
+    ext: Annotated[list[str] | None, typer.Option("--ext", help="형식(여러 번 지정 가능)")] = None,
+    mtime_from: str | None = typer.Option(None, "--from", help="수정일 시작(예: 2026-10-01)"),
+    mtime_to: str | None = typer.Option(None, "--to", help="수정일 끝(그날 포함)"),
+    exclude_deleted: bool = typer.Option(
+        False, "--exclude-deleted", help="로컬에서 삭제된 문서 제외(기본: 포함)"
+    ),
+    limit: int = typer.Option(30, help="최대 결과 수"),
+    as_json: bool = typer.Option(False, "--json", help="JSON으로 출력"),
+) -> None:
+    """Hybrid 검색(벡터 + BM25, RRF)을 실행하고 결과와 검색 범위를 출력한다(개발·E2E 확인용)."""
+    import json
+
+    from app.providers.factory import create_embedding_provider
+    from app.query.search import SearchFilters, SearchResult, search
+
+    _setup_logging()
+    filters = SearchFilters(
+        directory=directory,
+        exts=ext or None,
+        mtime_from=_parse_when(mtime_from, end_of_day=False),
+        mtime_to=_parse_when(mtime_to, end_of_day=True),
+        include_deleted=not exclude_deleted,
+    )
+
+    async def work(session: AsyncSession) -> SearchResult:
+        embedder = create_embedding_provider()
+        try:
+            return await search(session, embedder, query, filters=filters, limit=limit)
+        finally:
+            await _close_provider(embedder)
+
+    result = _run_db(work)
+    if as_json:
+        payload = {
+            "coverage": result.coverage.as_dict(),
+            "latency_ms": result.latency_ms,
+            "vector_used": result.vector_used,
+            "hits": [
+                {
+                    **hit.log_entry(),
+                    "path": hit.path,
+                    "location": hit.location,
+                    "mtime": hit.mtime.isoformat(),
+                    "locally_deleted": hit.locally_deleted,
+                    "snippet": hit.snippet,
+                }
+                for hit in result.hits
+            ],
+        }
+        typer.echo(json.dumps(payload, ensure_ascii=False))
+        return
+    cov = result.coverage
+    typer.echo(
+        f"검색 범위: 키워드 {cov.bm25_docs} · 의미 {cov.vector_docs} · 대기 {cov.pending_docs}"
+        f" (필터에 맞는 문서 {cov.total_docs}, 필터 {cov.filters_applied or '없음'})"
+    )
+    for hit in result.hits:
+        deleted = " [로컬 삭제됨]" if hit.locally_deleted else ""
+        typer.echo(
+            f"{hit.rank:>2}. {hit.rrf_score:.4f} (벡터 {hit.vector_rank or '-'}, "
+            f"BM25 {hit.bm25_rank or '-'}) {hit.path} {hit.location}{deleted}\n    {hit.snippet}"
+        )
+    typer.echo(f"결과 {len(result.hits)}건, 지연 {result.latency_ms}")
 
 
 @app.command()

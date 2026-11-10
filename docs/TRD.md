@@ -224,7 +224,7 @@ chanjin-rag/
 | 테이블 | 핵심 컬럼 | 설명 |
 | --- | --- | --- |
 | `sync_config` | `roots jsonb`, `excludes jsonb`, `max_file_mb int`(기본 10), `updated_at` | 단일 행. Agent가 실행할 때마다 받아 감. 고정 제외는 여기에 넣지 않고 코드에 둠. `max_file_mb`는 웹에서 바꾸지 않음(Nginx 업로드 상한과 함께 바꿔야 하므로) |
-| `documents` | `id`, `path`, `path_key`(NFC 정규화 후 소문자, unique), `filename`, `ext`(소문자), `size`, `mtime`, `sha256`, `status`, `failure_code`, `failure_detail`, `content_indexed bool`, `locally_deleted bool`, `deleted_at`, `needs_upload bool`, `embed_charged_sha256`, `embed_model`, `embed_dim`, `created_at`, `updated_at` | 파일 1개 = 1행. `path`는 원래 Windows 경로를 그대로 보관. `embed_charged_sha256`은 한도를 이미 차감한 버전 |
+| `documents` | `id`, `path`, `path_key`(NFC 정규화 후 소문자, unique), `filename`, `ext`(소문자, 점 포함: `.md`), `size`, `mtime`, `sha256`, `status`, `failure_code`, `failure_detail`, `content_indexed bool`, `locally_deleted bool`, `deleted_at`, `needs_upload bool`, `embed_charged_sha256`, `embed_model`, `embed_dim`, `created_at`, `updated_at` | 파일 1개 = 1행. `path`는 원래 Windows 경로를 그대로 보관. `embed_charged_sha256`은 한도를 이미 차감한 버전 |
 | `sections` | `id`, `document_id`, `seq`, `location jsonb`, `heading_path text[]`, `kind`, `text` | 추출 텍스트 원본. 재청킹은 여기서 다시 하므로 재업로드가 필요 없음 |
 | `chunks` | `id`, `document_id`, `seq`, `location jsonb`, `heading_path`, `filename`, `content`, `content_sha256`, `bm25_text`, `token_count`, `embedding halfvec(N)`(NULL 허용, N=`EMBED_DIM`), `embed_model` | 검색 단위. `bm25_text`는 Kiwi 토큰을 공백으로 이은 문자열. `content_sha256`은 임베딩 입력(머리말 포함)의 해시로, 임베딩 재사용에 씀. `filename`은 `documents.filename`의 사본으로, BM25 색인이 한 테이블의 컬럼만 색인할 수 있어 둠(파일 이동 시 함께 갱신) |
 | `jobs` | `id`, `type`, `document_id`, `sha256`, `status`, `priority`, `attempts`, `run_after`, `locked_at`, `last_error` | `type`: `extract`, `index`, `embed`. `status`: `queued`, `running`, `done`(버전이 바뀌어 결과를 버린 경우 포함), `failed`(재시도 초과). `priority`는 파일 수정 시각(`timestamptz`). `sha256`은 작업 대상 버전으로, 끝날 때 문서의 현재 해시와 다르면 결과를 버림 |
@@ -285,7 +285,7 @@ stateDiagram-v2
 
 | 대상 | 색인 | 비고 |
 | --- | --- | --- |
-| `chunks.embedding` | HNSW(`halfvec_cosine_ops`), `m=16`, `ef_construction=64` | 필터와 같이 쓸 때 결과가 모자라지 않게 `hnsw.iterative_scan`을 켭니다 |
+| `chunks.embedding` | HNSW(`halfvec_cosine_ops`), `m=16`, `ef_construction=64` | 필터와 같이 쓸 때 결과가 모자라지 않게 검색 트랜잭션에서 `SET LOCAL hnsw.iterative_scan = relaxed_order`, `hnsw.ef_search = 100`(기본 40이 후보 수 50보다 작음)을 켭니다(7.2) |
 | `chunks.bm25_text` | pg\_search BM25 색인, 공백(whitespace) 토크나이저 | Kiwi가 이미 토큰화했으므로 DB에서는 공백으로만 자릅니다. 함께 `filename`, `heading_path`도 색인(`simple` 토크나이저: 구두점·밑줄에서 자르고 소문자화). pg\_search 0.26.5 문법: `USING bm25 (id, (bm25_text::pdb.whitespace), (filename::pdb.simple), (heading_path::pdb.simple))`, 첫 컬럼이 키(`key_field`는 0.26부터 불필요) |
 | `documents` | `path_key` unique, `sha256`, `(status)`, `(locally_deleted)` | |
 | `sections`, `chunks` | `(document_id, seq)` unique, `chunks.content_sha256` | |
@@ -509,7 +509,16 @@ flowchart TD
 
 **검색 범위(`coverage`)**
 
-질의 시점에 필터를 적용한 문서 수를 셉니다: `bm25_docs`(키워드 검색 가능), `vector_docs`(의미 검색 가능), `pending_docs`(대기, 처리 중), `filters_applied`. 필터에 맞는 문서가 0개면 검색하지 않고 "필터 조건에 맞는 문서가 없습니다"로 답합니다. 문서가 하나도 없으면 첫 실행 체크리스트로 안내합니다.
+질의 시점에 필터를 적용한 문서 수를 셉니다: `bm25_docs`(키워드 검색 가능), `vector_docs`(의미 검색 가능), `pending_docs`(대기, 처리 중), `filters_applied`. 구현(`app/query/search.py`의 `compute_coverage`) 기준은 다음과 같습니다.
+
+| 값 | 기준 |
+| --- | --- |
+| `bm25_docs` | 청크가 1개 이상인 문서(파일명 청크만 있는 `meta_only`·`no_text`·미지원 형식 포함) |
+| `vector_docs` | 임베딩된 청크가 1개 이상인 문서(`embedding` 중 일부만 끝난 문서 포함) |
+| `pending_docs` | 상태가 `queued`, `extracting`, `embedding`인 문서(화면의 "대기"·"처리 중") |
+| `total_docs` | 필터에 맞는 전체 문서 수. 0이면 검색 SQL을 실행하지 않음 |
+| `filters_applied` | 기본값이 아닌 필터만 담은 객체(예: `{"directory": "C:\…", "exts": ["md"], "include_deleted": false}`) |
+ 필터에 맞는 문서가 0개면 검색하지 않고 "필터 조건에 맞는 문서가 없습니다"로 답합니다. 문서가 하나도 없으면 첫 실행 체크리스트로 안내합니다.
 
 **답변 후처리**
 
@@ -520,33 +529,57 @@ flowchart TD
 
 ### 7.2 Hybrid 검색 SQL
 
-벡터 상위 50개와 BM25 상위 50개를 SQL 하나 안에서 RRF(k=60)로 합칩니다. 구조는 아래와 같고, 실제 연산자와 함수명은 pg\_search 버전에 맞춥니다.
+벡터 상위 50개와 BM25 상위 50개를 SQL 하나 안에서 RRF(k=60)로 합쳐 후보 30개를 고릅니다. 구현은 `backend/app/query/search.py`(`hybrid_search`, 질문 임베딩까지 하는 `search`)이고, 아래는 pg\_search 0.26.5 기준 실제 구조입니다.
 
 ```sql
+-- 같은 트랜잭션에서 먼저: SET LOCAL hnsw.iterative_scan = relaxed_order; SET LOCAL hnsw.ef_search = 100;
+--                        SET LOCAL paradedb.planner_warnings = 'Off';
 WITH vec AS (
-  SELECT c.id, ROW_NUMBER() OVER (ORDER BY c.embedding <=> :qvec) AS r
-  FROM chunks c JOIN documents d ON d.id = c.document_id
-  WHERE c.embedding IS NOT NULL AND /* 필터 */
-  ORDER BY c.embedding <=> :qvec
-  LIMIT 50
+  SELECT id, ROW_NUMBER() OVER (ORDER BY dist, id) AS r
+  FROM (
+    SELECT c.id, c.embedding <=> CAST(:qvec AS halfvec) AS dist
+    FROM chunks c JOIN documents d ON d.id = c.document_id
+    WHERE c.embedding IS NOT NULL /* AND 필터 */
+    ORDER BY c.embedding <=> CAST(:qvec AS halfvec)
+    LIMIT 50
+  ) v
 ),
 kw AS (
-  SELECT c.id, ROW_NUMBER() OVER (ORDER BY paradedb.score(c.id) DESC) AS r
-  FROM chunks c JOIN documents d ON d.id = c.document_id
-  WHERE c.bm25_text @@@ :qtokens AND /* 필터 */
-  ORDER BY paradedb.score(c.id) DESC
-  LIMIT 50
+  SELECT id, ROW_NUMBER() OVER (ORDER BY score DESC, id) AS r
+  FROM (
+    SELECT c.id, pdb.score(c.id) AS score
+    FROM chunks c JOIN documents d ON d.id = c.document_id
+    WHERE (c.bm25_text ||| :qtokens OR c.filename ||| :qtokens OR c.heading_path ||| :qtokens)
+      /* AND 필터 */
+    ORDER BY pdb.score(c.id) DESC
+    LIMIT 50
+  ) k
+),
+fused AS (
+  SELECT id, vec.r AS vector_rank, kw.r AS bm25_rank,
+         COALESCE(1.0 / (60 + vec.r), 0) + COALESCE(1.0 / (60 + kw.r), 0) AS rrf
+  FROM vec FULL OUTER JOIN kw USING (id)
+),
+capped AS (
+  SELECT f.*, c.document_id,
+         ROW_NUMBER() OVER (PARTITION BY c.document_id ORDER BY f.rrf DESC, f.id) AS doc_rank
+  FROM fused f JOIN chunks c ON c.id = f.id
 )
-SELECT id,
-       COALESCE(1.0 / (60 + vec.r), 0) + COALESCE(1.0 / (60 + kw.r), 0) AS rrf
-FROM vec FULL OUTER JOIN kw USING (id)
-ORDER BY rrf DESC
+SELECT … FROM capped x JOIN chunks c … JOIN documents d …
+WHERE x.doc_rank <= 3
+ORDER BY x.rrf DESC, x.id
 LIMIT 30;
 ```
 
-- **필터:** 디렉터리(`d.path_key LIKE :prefix || '%'`), 형식(`d.ext = ANY(:exts)`), 수정일(`d.mtime BETWEEN …`). 로컬 삭제 문서는 기본으로 포함하고 표시만 하며, 필터의 `include_deleted=false`로 뺄 수 있습니다.
-- 아직 임베딩되지 않은 청크는 `vec`에 없고 `kw`로만 들어옵니다(PRD 5.2의 "BM25로만 검색").
-- 같은 문서의 청크가 상위를 독점하지 않도록, 최종 8개 선택 시 문서당 최대 3개로 제한합니다.
+- **BM25 검색어:** 질문(과 rewrite의 `keyword_query`)을 문서와 같은 Kiwi 함수(`bm25_tokens`, 6.4)로 토큰화해 공백으로 잇습니다. `|||`(match disjunction)는 필드의 토크나이저로 검색어를 자른 뒤 OR로 찾으므로 `bm25_text`(공백)·`filename`·`heading_path`(simple)에 같은 문자열을 넘깁니다. 세 필드 점수는 `pdb.score`에서 합쳐집니다. `@@@ '문자열'`은 쿼리 파서를 거쳐 `:`·괄호·따옴표가 섞인 토큰에서 깨질 수 있어 쓰지 않습니다. 토큰이 없으면 `kw`를 비웁니다.
+- **순위 계산 위치:** 각 목록은 안쪽 질의에서 `ORDER BY … LIMIT 50`으로 먼저 자르고 바깥에서 `ROW_NUMBER()`를 매깁니다. 창 함수를 `LIMIT`과 같은 단계에 두면 필터에 맞는 모든 행을 정렬하게 되어 HNSW 색인을 쓰지 못하고, `relaxed_order`로 조금 어긋난 순서도 바깥에서 바로잡습니다(청크 3,000개 실측에서 `Index Scan using ix_chunks_embedding_hnsw` + 필터 확인).
+- **필터:** 디렉터리는 `starts_with(d.path_key, :prefix)`. 접두어는 입력을 `path_key`와 같이 NFC·소문자로 바꾸고 `/`를 `\`로, 끝에 `\`를 붙입니다(`C:\a`가 `C:\ab\…`에 걸리지 않게). `LIKE`는 `\`를 이스케이프 문자로 해석해 Windows 경로에서 틀리므로 쓰지 않습니다. 형식은 `ltrim(d.ext, '.') = ANY(:exts)`(입력은 점 없이 소문자), 수정일은 `d.mtime >= :from`, `d.mtime <= :to`(양 끝 포함). 로컬 삭제 문서는 기본으로 포함하고 결과에 `locally_deleted`로 표시만 하며, 필터의 `include_deleted=false`로 뺄 수 있습니다. 같은 필터를 검색 범위(7.1)에도 적용합니다.
+- 아직 임베딩되지 않은 청크는 `vec`에 없고 `kw`로만 들어옵니다(PRD 5.2의 "BM25로만 검색"). 질문 임베딩 호출이 실패하면(한도 초과·장애) 질의를 막지 않고 `vec`를 비운 채 BM25로만 찾습니다(`search.embed_failed` 로그).
+- 같은 문서의 청크가 상위를 독점하지 않도록 후보 30개를 고를 때 문서당 최대 3개로 제한합니다(`capped`). 재정렬 뒤 최종 8개를 고를 때도 같은 제한을 지킵니다.
+- 필터에 맞는 문서가 0개(`total_docs = 0`)면 검색 SQL을 실행하지 않습니다.
+- **결과 항목:** `chunk_id`, `document_id`, `path`, `filename`, `ext`, `location`, `heading_path`, `mtime`, `snippet`(본문에서 질문 토큰이 처음 나오는 곳 주변 200자), `content`, `locally_deleted`, `rrf_score`, `vector_rank`, `bm25_rank`(목록에 없으면 null), `rank`. 질의 로그 `retrieved`에는 ID·점수·순위만 넣습니다(`log_entry()`).
+- **지연:** `latency_ms`에 `embed`(질문 임베딩), `coverage`, `sql`, `total`(ms)을 담아 돌려줍니다. 로그 이벤트 `search.completed`에 결과 수, 문서 수, 벡터·BM25 후보 수, 검색 범위 숫자, 적용한 필터 이름, 지연을 남깁니다(질문·경로는 남기지 않음).
+- 개발·E2E 확인용 CLI: `rag-backend search "질문" [--dir 폴더] [--ext md] [--from 2026-10-01] [--to …] [--exclude-deleted] [--json]`.
 
 ### 7.3 SSE 이벤트
 
