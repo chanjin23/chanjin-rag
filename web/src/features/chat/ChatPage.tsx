@@ -1,12 +1,46 @@
-import { useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, type KeyboardEvent, useCallback, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type FormEvent,
+  type KeyboardEvent,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { useLocation, useNavigate, useParams } from "react-router";
 import { ME_QUERY_KEY } from "@/api/auth";
 import { type Coverage, NEW_CONVERSATION, type Source, type Stage } from "@/api/chat";
+import {
+  CONVERSATIONS_KEY,
+  conversationKey,
+  getConversation,
+  getIndexCoverage,
+  INDEX_COVERAGE_KEY,
+  listConversations,
+} from "@/api/conversations";
 import { loginPath } from "@/features/auth/redirect";
+import { NARROW_QUERY, useMediaQuery } from "@/hooks/useMediaQuery";
 import { cn } from "@/lib/cn";
+import { AnswerMarkdown } from "./AnswerMarkdown";
+import {
+  activeFilterCount,
+  ChatFiltersForm,
+  EMPTY_FILTERS,
+  type FilterState,
+  toApiFilters,
+} from "./ChatFilters";
+import { ConversationList, displayTitle } from "./ConversationList";
 import { clearDraft, loadDraft, saveDraft } from "./draft";
-import { type ChatMessage, useChatStream } from "./useChatStream";
+import { FeedbackBar } from "./FeedbackBar";
+import { fileName, formatMonthDay } from "./format";
+import { type PanelFocus, SourcePanel } from "./SourcePanel";
+import { type ChatMessage, fromStored, useChatStream } from "./useChatStream";
+
+/**
+ * 채팅 화면 (TRD 9.1, 9.2): 왼쪽 대화 목록, 가운데 메시지·필터·입력창(위에 색인 범위 한 줄),
+ * 오른쪽 출처 패널(접기). 너비 768px 미만에서는 대화 목록과 출처 패널을 서랍으로 연다.
+ */
 
 const STAGE_LABEL: Record<Stage, string> = {
   rewriting: "질문 정리 중",
@@ -18,56 +52,11 @@ const STAGE_LABEL: Record<Stage, string> = {
   generating: "답변 작성 중",
 };
 
-const LOCATION_LABEL: Record<string, string> = {
-  page: "쪽",
-  slide: "슬라이드",
-  paragraph: "문단",
-  table: "표",
-  row: "행",
-  sheet: "시트",
-};
+const nf = new Intl.NumberFormat("ko-KR");
 
-function fileName(path: string): string {
-  return path.split(/[\\/]/).pop() ?? path;
-}
+type RouteState = { createdFrom?: string } | null;
 
-function formatLocation(location: Record<string, unknown>): string {
-  const parts: string[] = [];
-  for (const [key, label] of Object.entries(LOCATION_LABEL)) {
-    if (location[key] === undefined) continue;
-    const end = location[`${key}_end`];
-    parts.push(`${label} ${String(location[key])}${end !== undefined ? `-${String(end)}` : ""}`);
-  }
-  const lines = location.lines;
-  if (Array.isArray(lines) && lines.length === 2) parts.push(`${lines[0]}-${lines[1]}줄`);
-  return parts.join(", ");
-}
-
-function formatDate(iso: string): string {
-  return new Date(iso).toLocaleDateString("ko-KR");
-}
-
-/** 출처 목록(간단 표시). 출처 패널·인용 칩은 T11에서 만든다. */
-function SourceList({ title, sources }: { title: string; sources: Source[] }) {
-  return (
-    <div className="mt-3 border-t border-slate-100 pt-2" aria-label={title}>
-      <p className="text-xs font-medium text-slate-500">{title}</p>
-      <ul className="mt-1 space-y-0.5">
-        {sources.map((s, i) => (
-          <li key={`${s.document_id}-${s.chunk_id ?? i}`} className="text-xs text-slate-600">
-            {s.n !== null && <span className="mr-1 font-medium">[{s.n}]</span>}
-            <span title={s.path}>{fileName(s.path)}</span>
-            {formatLocation(s.location) && <span> · {formatLocation(s.location)}</span>}
-            <span> · {formatDate(s.mtime)} 수정</span>
-            {s.locally_deleted && <span className="text-amber-600"> · 로컬에서 삭제됨</span>}
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
-/** 찾지 못함 응답의 검색 범위(TRD 7.1 coverage). 화면 확장(색인 범위 줄)은 T11. */
+/** 찾지 못함 응답의 검색 범위(TRD 7.1 coverage). */
 function CoverageLine({ coverage }: { coverage: Coverage }) {
   const filters = Object.keys(coverage.filters_applied);
   return (
@@ -79,33 +68,146 @@ function CoverageLine({ coverage }: { coverage: Coverage }) {
   );
 }
 
-function AssistantBody({ m }: { m: ChatMessage }) {
-  const cited = m.sources?.filter((s) => s.n !== null) ?? [];
-  const others = m.sources?.filter((s) => s.n === null) ?? [];
+/** 입력창 위 색인 범위 한 줄(F-18). 예: "키워드 검색 1,000 · 의미 검색 340 · 완료 예상 11월 14일" */
+function IndexCoverageLine() {
+  const coverage = useQuery({ queryKey: INDEX_COVERAGE_KEY, queryFn: getIndexCoverage });
+  if (!coverage.data) return null;
+  const c = coverage.data;
+  return (
+    <p className="mb-1.5 text-xs text-slate-500" data-testid="index-coverage">
+      키워드 검색 {nf.format(c.bm25_docs)} · 의미 검색 {nf.format(c.vector_docs)} ·{" "}
+      {c.estimated_completion
+        ? `완료 예상 ${formatMonthDay(c.estimated_completion)}`
+        : "임베딩 완료"}
+    </p>
+  );
+}
+
+function Drawer({
+  side,
+  label,
+  open,
+  onClose,
+  children,
+}: {
+  side: "left" | "right";
+  label: string;
+  open: boolean;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: globalThis.KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-40">
+      <button
+        type="button"
+        aria-label={`${label} 닫기`}
+        onClick={onClose}
+        className="absolute inset-0 bg-slate-900/40"
+      />
+      <div
+        role="dialog"
+        aria-label={label}
+        className={cn(
+          "absolute top-0 flex h-full w-[85%] max-w-sm flex-col bg-slate-50 shadow-xl",
+          side === "left" ? "left-0" : "right-0",
+        )}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function AssistantBody({
+  m,
+  onCite,
+  onRetry,
+  onShowSources,
+  onFeedback,
+  canRetry,
+}: {
+  m: ChatMessage;
+  onCite: (n: number) => void;
+  onRetry: () => void;
+  onShowSources: () => void;
+  onFeedback: (f: NonNullable<ChatMessage["feedback"]>) => void;
+  canRetry: boolean;
+}) {
+  const numbers = (m.sources ?? []).flatMap((s) => (s.n !== null ? [s.n] : []));
+  const others = (m.sources ?? []).filter((s) => s.n === null);
+  const done = m.messageId !== undefined && !m.error;
   return (
     <>
-      {m.content || (!m.error ? "…" : "")}
-      {cited.length > 0 && <SourceList title="출처" sources={cited} />}
-      {others.length > 0 && (
-        <SourceList title={m.notFound ? "참고 후보" : "후보 문서"} sources={others} />
+      {m.content ? (
+        <AnswerMarkdown content={m.content} citationNumbers={numbers} onCite={onCite} />
+      ) : (
+        !m.error && <span className="text-slate-400">…</span>
       )}
       {m.notFound && m.coverage && <CoverageLine coverage={m.coverage} />}
-      {m.error && <p className="text-red-600">오류: {m.error.message}</p>}
+      {m.notFound && others.length > 0 && (
+        <p className="mt-1 text-xs text-slate-500">
+          참고 후보:{" "}
+          <button type="button" onClick={onShowSources} className="underline hover:text-slate-800">
+            {others.map((s) => fileName(s.path)).join(", ")}
+          </button>
+        </p>
+      )}
+      {m.error && (
+        <div className="mt-1 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700" data-testid="chat-error">
+          <p>{m.error.message}</p>
+          {m.error.retryable && (
+            <button
+              type="button"
+              onClick={onRetry}
+              disabled={!canRetry}
+              className="mt-1.5 rounded border border-red-300 bg-white px-2 py-0.5 text-xs text-red-700 hover:bg-red-100 disabled:opacity-40"
+            >
+              다시 시도
+            </button>
+          )}
+        </div>
+      )}
       {m.latencyMs !== undefined && <p className="mt-1 text-xs text-slate-400">{m.latencyMs}ms</p>}
+      {done && m.messageId !== undefined && (
+        <FeedbackBar messageId={m.messageId} feedback={m.feedback} onSaved={onFeedback} />
+      )}
     </>
   );
 }
 
 export function ChatPage() {
-  // 대화 목록·불러오기(F-11)는 T11에서 붙인다. URL에 id가 없으면 새 대화로 보낸다.
   const { conversationId = NEW_CONVERSATION } = useParams();
-  return <ChatView key={conversationId} conversationId={conversationId} />;
+  const location = useLocation();
+  // 새 대화가 만들어져 URL이 `/c/{id}`로 바뀔 때는 같은 화면을 유지한다(스트리밍 중인 답변을 잃지 않게)
+  // 새 대화 화면은 열 때마다 새로 시작한다("새 대화"를 다시 눌러도 비운다)
+  const viewKey =
+    (location.state as RouteState)?.createdFrom ??
+    (conversationId === NEW_CONVERSATION ? `new-${location.key}` : conversationId);
+  return <ChatView key={viewKey} viewKey={viewKey} conversationId={conversationId} />;
 }
 
-function ChatView({ conversationId }: { conversationId: string }) {
+function ChatView({ conversationId, viewKey }: { conversationId: string; viewKey: string }) {
   const navigate = useNavigate();
   const location = useLocation();
   const queryClient = useQueryClient();
+  const narrow = useMediaQuery(NARROW_QUERY);
+  const mountId = useRef(conversationId).current;
+  const numericId = /^\d+$/.test(conversationId) ? Number(conversationId) : null;
+
+  const [listOpen, setListOpen] = useState(false);
+  const [panelOpen, setPanelOpen] = useState(true);
+  const [panelDrawer, setPanelDrawer] = useState(false);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [filters, setFilters] = useState<FilterState>(EMPTY_FILTERS);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [focus, setFocus] = useState<PanelFocus | null>(null);
 
   // 세션이 만료돼 보내지 못한 질문은 보존하고 로그인 화면으로 보낸다. 로그인 후 이 화면으로
   // 돌아오면 입력창에 다시 채운다(TRD 8.3, 9.2).
@@ -117,10 +219,53 @@ function ChatView({ conversationId }: { conversationId: string }) {
     },
     [conversationId, location.pathname, location.search, navigate, queryClient],
   );
-  const { messages, stage, progress, isStreaming, send, stop } = useChatStream(conversationId, {
-    onUnauthenticated,
-  });
+  const onConversation = useCallback(
+    (id: number) => {
+      navigate(`/c/${id}`, { replace: true, state: { createdFrom: viewKey } });
+      void queryClient.invalidateQueries({ queryKey: CONVERSATIONS_KEY, exact: true });
+    },
+    [viewKey, navigate, queryClient],
+  );
+  const onSettled = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: CONVERSATIONS_KEY, exact: true });
+    void queryClient.invalidateQueries({ queryKey: INDEX_COVERAGE_KEY });
+  }, [queryClient]);
+
+  const { messages, setMessages, stage, progress, isStreaming, send, retry, stop, setFeedback } =
+    useChatStream(conversationId, { onUnauthenticated, onConversation, onSettled });
   const [input, setInput] = useState(() => loadDraft(conversationId));
+
+  // 기존 대화로 들어오면 저장된 메시지를 불러온다(새 대화에서 이어진 화면은 이미 메시지가 있다)
+  const loadFromServer = mountId === conversationId && numericId !== null;
+  const detail = useQuery({
+    queryKey: conversationKey(numericId ?? 0),
+    queryFn: () => getConversation(numericId!),
+    enabled: loadFromServer,
+    staleTime: Infinity,
+    gcTime: 0,
+    retry: false,
+  });
+  const conversations = useQuery({ queryKey: CONVERSATIONS_KEY, queryFn: listConversations });
+  const listed = conversations.data?.find((c) => c.id === numericId);
+  const loaded = useRef(false);
+  useEffect(() => {
+    if (!detail.data || loaded.current) return;
+    loaded.current = true;
+    setMessages(detail.data.messages.map(fromStored));
+  }, [detail.data, setMessages]);
+
+  const assistants = messages.filter((m) => m.role === "assistant");
+  const current =
+    assistants.find((m) => m.id === selected) ??
+    [...assistants].reverse().find((m) => (m.sources?.length ?? 0) > 0) ??
+    null;
+
+  const openSources = (id: string, n?: number) => {
+    setSelected(id);
+    if (n !== undefined) setFocus({ n, nonce: Date.now() });
+    if (narrow) setPanelDrawer(true);
+    else setPanelOpen(true);
+  };
 
   const submit = (e?: FormEvent) => {
     e?.preventDefault();
@@ -128,7 +273,19 @@ function ChatView({ conversationId }: { conversationId: string }) {
     if (!text || isStreaming) return;
     setInput("");
     clearDraft(conversationId);
-    void send(text);
+    setSelected(null);
+    setFocus(null);
+    void send(text, { filters: toApiFilters(filters) });
+  };
+
+  const summarize = (source: Source) => {
+    if (isStreaming) return;
+    setSelected(null);
+    setFocus(null);
+    void send(`「${fileName(source.path)}」 요약해줘`, {
+      summarizeDocumentId: source.document_id,
+      filters: toApiFilters(filters),
+    });
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -138,63 +295,165 @@ function ChatView({ conversationId }: { conversationId: string }) {
     }
   };
 
-  return (
-    <div className="mx-auto flex h-full max-w-3xl flex-col px-4">
-      <div className="flex-1 space-y-4 overflow-y-auto py-6">
-        {messages.length === 0 && (
-          <p className="pt-20 text-center text-sm text-slate-500">
-            내 문서에 대해 질문해 보세요. 답변에는 출처가 함께 표시됩니다.
-          </p>
-        )}
-        {messages.map((m) => (
-          <div key={m.id} className={cn("flex", m.role === "user" ? "justify-end" : "justify-start")}>
-            <div
-              className={cn(
-                "max-w-[85%] whitespace-pre-wrap rounded-2xl px-4 py-2.5 text-sm leading-relaxed",
-                m.role === "user" ? "bg-slate-900 text-white" : "border border-slate-200 bg-white",
-              )}
-            >
-              {m.role === "assistant" ? <AssistantBody m={m} /> : m.content}
-            </div>
-          </div>
-        ))}
-      </div>
+  const filterCount = activeFilterCount(filters);
+  const notFoundSelected = current?.notFound ?? false;
 
-      <form onSubmit={submit} className="border-t border-slate-200 py-4">
-        {stage && (
-          <p className="mb-2 text-xs text-slate-500" role="status">
-            {STAGE_LABEL[stage]}
-            {progress && ` (${progress.done}/${progress.total})`}…
-          </p>
-        )}
-        <div className="flex items-end gap-2">
-          <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={onKeyDown}
-            rows={2}
-            placeholder="질문을 입력하세요 (Enter 전송, Shift+Enter 줄바꿈)"
-            className="flex-1 resize-none rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-slate-500"
-          />
-          {isStreaming ? (
+  const panel = (
+    <SourcePanel
+      key={current?.id ?? "none"}
+      sources={current?.sources ?? []}
+      notFound={notFoundSelected}
+      focus={focus}
+      onSummarize={summarize}
+    />
+  );
+
+  const list = (
+    <ConversationList currentId={numericId} onNavigate={() => setListOpen(false)} />
+  );
+
+  return (
+    <div className="flex h-full min-h-0">
+      {!narrow && (
+        <aside className="w-60 shrink-0 border-r border-slate-200 bg-slate-50">{list}</aside>
+      )}
+      {narrow && (
+        <Drawer side="left" label="대화 목록 서랍" open={listOpen} onClose={() => setListOpen(false)}>
+          {list}
+        </Drawer>
+      )}
+
+      <div className="flex min-w-0 flex-1 flex-col px-4">
+        <div className="flex items-center gap-2 border-b border-slate-200 py-2 text-sm">
+          {narrow && (
             <button
               type="button"
-              onClick={stop}
-              className="rounded-xl border border-slate-300 px-4 py-2 text-sm hover:bg-slate-100"
+              onClick={() => setListOpen(true)}
+              className="rounded-md border border-slate-300 px-2 py-1 text-xs"
             >
-              중지
-            </button>
-          ) : (
-            <button
-              type="submit"
-              disabled={!input.trim()}
-              className="rounded-xl bg-slate-900 px-4 py-2 text-sm text-white disabled:opacity-40"
-            >
-              전송
+              대화 목록
             </button>
           )}
+          <h1 className="min-w-0 flex-1 truncate font-medium text-slate-700">
+            {listed ? displayTitle(listed) : numericId === null ? "새 대화" : ""}
+          </h1>
+          <button
+            type="button"
+            onClick={() => (narrow ? setPanelDrawer(true) : setPanelOpen((v) => !v))}
+            aria-expanded={narrow ? panelDrawer : panelOpen}
+            className="rounded-md border border-slate-300 px-2 py-1 text-xs hover:bg-slate-100"
+          >
+            {narrow ? "출처 보기" : panelOpen ? "출처 패널 접기" : "출처 패널 열기"}
+          </button>
         </div>
-      </form>
+
+        <div
+          className="mx-auto w-full max-w-3xl flex-1 space-y-4 overflow-y-auto py-6"
+          role="log"
+          aria-live="polite"
+          aria-label="대화 내용"
+        >
+          {detail.isError && (
+            <p className="pt-20 text-center text-sm text-slate-500">대화를 찾을 수 없습니다.</p>
+          )}
+          {messages.length === 0 && !detail.isError && !detail.isLoading && (
+            <p className="pt-20 text-center text-sm text-slate-500">
+              내 문서에 대해 질문해 보세요. 답변에는 출처가 함께 표시됩니다.
+            </p>
+          )}
+          {messages.map((m) => (
+            <div key={m.id} className={cn("flex", m.role === "user" ? "justify-end" : "justify-start")}>
+              <div
+                data-testid={m.role === "assistant" ? "assistant-message" : "user-message"}
+                className={cn(
+                  "max-w-[85%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed",
+                  m.role === "user"
+                    ? "whitespace-pre-wrap bg-slate-900 text-white"
+                    : cn(
+                        "border bg-white",
+                        current?.id === m.id ? "border-sky-200" : "border-slate-200",
+                      ),
+                )}
+              >
+                {m.role === "assistant" ? (
+                  <AssistantBody
+                    m={m}
+                    onCite={(n) => openSources(m.id, n)}
+                    onShowSources={() => openSources(m.id)}
+                    onRetry={() => retry(m.id)}
+                    canRetry={!isStreaming}
+                    onFeedback={(f) => setFeedback(m.id, f)}
+                  />
+                ) : (
+                  m.content
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <form onSubmit={submit} className="mx-auto w-full max-w-3xl border-t border-slate-200 py-3">
+          {stage && (
+            <p className="mb-2 text-xs text-slate-500" role="status">
+              {STAGE_LABEL[stage]}
+              {progress && ` (${progress.done}/${progress.total})`}…
+            </p>
+          )}
+          {filtersOpen && <ChatFiltersForm value={filters} onChange={setFilters} />}
+          <div className="flex items-center gap-2">
+            <IndexCoverageLine />
+            <button
+              type="button"
+              onClick={() => setFiltersOpen((v) => !v)}
+              aria-expanded={filtersOpen}
+              className="mb-1.5 ml-auto rounded px-2 py-0.5 text-xs text-slate-500 hover:bg-slate-100"
+            >
+              필터{filterCount > 0 ? ` (${filterCount})` : ""}
+            </button>
+          </div>
+          <div className="flex items-end gap-2">
+            <textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={onKeyDown}
+              rows={2}
+              placeholder="질문을 입력하세요 (Enter 전송, Shift+Enter 줄바꿈)"
+              className="flex-1 resize-none rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-slate-500"
+            />
+            {isStreaming ? (
+              <button
+                type="button"
+                onClick={stop}
+                className="rounded-xl border border-slate-300 px-4 py-2 text-sm hover:bg-slate-100"
+              >
+                중지
+              </button>
+            ) : (
+              <button
+                type="submit"
+                disabled={!input.trim()}
+                className="rounded-xl bg-slate-900 px-4 py-2 text-sm text-white disabled:opacity-40"
+              >
+                전송
+              </button>
+            )}
+          </div>
+        </form>
+      </div>
+
+      {!narrow && panelOpen && (
+        <aside
+          aria-label="출처 패널"
+          className="w-80 shrink-0 overflow-y-auto border-l border-slate-200 bg-slate-50 p-3"
+        >
+          {panel}
+        </aside>
+      )}
+      {narrow && (
+        <Drawer side="right" label="출처 패널" open={panelDrawer} onClose={() => setPanelDrawer(false)}>
+          <div className="overflow-y-auto p-3">{panel}</div>
+        </Drawer>
+      )}
     </div>
   );
 }

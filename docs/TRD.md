@@ -629,7 +629,7 @@ LIMIT 30;
 | `internal` | 그 밖의 서버 오류 | true | 문제가 발생했습니다 |
 
 - 노드 이벤트와 토큰은 LangGraph의 스트리밍(`astream`의 custom 모드, 노드가 `get_stream_writer()`로 씀)으로 받아 SSE로 바꿉니다. LangChain 채팅 모델을 쓰지 않으므로 messages 모드는 쓰지 않습니다. 그래프는 별도 작업(task)에서 돌고 이벤트는 큐로 SSE에 넘깁니다.
-- 경로의 `{id}`가 `new`면 대화를 새로 만듭니다(제목은 질문 앞 40자). 숫자가 아니거나 없는 대화면 404 `conversation_not_found`. 같은 대화의 동시 요청은 대화 행 `FOR UPDATE`로 줄 세웁니다.
+- 경로의 `{id}`가 `new`면 대화를 새로 만듭니다(제목은 질문 앞 40자, 제목이 빈 기존 대화도 첫 질문으로 채움). 응답 헤더 `X-Conversation-Id`로 대화 ID를 바로 알려 주므로, 웹은 첫 이벤트 전에 URL을 `/c/{id}`로 바꿉니다. 숫자가 아니거나 없는 대화면 404 `conversation_not_found`. 같은 대화의 동시 요청은 대화 행 `FOR UPDATE`로 줄 세웁니다.
 - 저장: 질문을 받으면 사용자 메시지(`complete`)와 답변 메시지(`streaming`)를 먼저 저장하고, 끝나면 답변과 `citations`(보낸 `sources` 그대로)를 `complete`로 바꿉니다. 실패·중단에도 질의 로그를 남깁니다.
 - 질문 전체 시간 상한은 `CHAT_TIMEOUT_SECONDS`(60초)입니다. 오류 이벤트와 409 응답 본문에는 `retryable`이 함께 있습니다.
 - 로그: `chat.message.received`(대화·메시지 ID, 길이, 이력 수, 필터 이름), `chat.message.completed`·`chat.message.not_found`(출처·인용 수, 판정, 재검색 여부, 검색 범위 숫자, 지연), `chat.message.failed`(`code`, 예외 이름), `chat.message.aborted`, `chat.message.conflict`, `chat.message.stale_aborted`. 질문·답변 원문은 남기지 않습니다(`LOG_QUERY_TEXT=true`일 때만 `received`에 질문).
@@ -716,6 +716,9 @@ NVIDIA API 실측값(13장)이 예산을 넘으면 rewrite 생략 조건을 넓�
 | GET | `/health` | DB 연결, Worker 마지막 하트비트, 디스크 여유, NVIDIA API 마지막 성공·실패 시각과 오류 코드 | 운영 |
 
 - 인증이 필요한 API는 세션이 없거나 만료되면 401을 돌려줍니다. 웹은 입력 중인 질문을 보존한 채 로그인 화면으로 보내고, 로그인 후 원래 화면으로 돌아옵니다.
+- 대화(`app/api/conversations.py`): 목록은 `updated_at` 내림차순 `[{id, title, created_at, updated_at}]`. `POST /conversations`(`title`?)는 제목을 주지 않으면 빈 제목으로 만들고 첫 질문 앞 40자로 채웁니다(웹은 빈 제목을 "새 대화"로 표시). `GET /conversations/{id}`는 메시지마다 `id`, `role`, `content`, `status`, `citations`, `created_at`, `not_found`·`coverage`(질의 로그에서), `feedback`(`rating`, `reason`, `note`)을 줍니다. `PATCH`는 `title`(공백 정리 후 1\~200자, 빈 값 422). `DELETE`는 204이며 메시지·질의 로그·피드백을 외래 키 `ON DELETE CASCADE`로 함께 지웁니다. 숫자가 아니거나 없는 대화는 404 `conversation_not_found`. 로그: `conversation.created`(`source`: `message`·`api`), `conversation.renamed`(제목 글자 수), `conversation.deleted`(지운 메시지·질의 로그·피드백 수). 제목 원문은 로그에 남기지 않습니다.
+- 피드백(`app/api/feedback.py`): 본문 `{rating: 1 | -1, reason?, note?(2,000자 이하, 빈 문자열은 NULL)}`. `message_id` 기준 `INSERT … ON CONFLICT DO UPDATE`로 덮어쓰며 `failure_type`·`reviewed_at`은 그대로 둡니다. 답변이 아닌 메시지·없는 메시지는 404 `message_not_found`. 로그 `feedback.saved`(메시지 ID, 평가, 사유, 메모 유무. 메모 원문은 남기지 않음).
+- 색인 범위(`app/api/index.py`): `by_status`(상태별 문서 수), `total_docs`·`bm25_docs`·`vector_docs`·`pending_docs`(질의의 검색 범위와 같은 기준), `embed_waiting`(`queued`·`extracting`·`indexed`·`embedding` 문서 수), `daily_limit`, `used_today`, `estimated_completion`(오늘 남은 한도를 먼저 쓰고 나머지를 하루 한도로 나눈 날 수를 더한 한국 시간 날짜, 기다리는 파일이 없으면 null). 로그 `index.coverage.read`.
 
 FastAPI의 OpenAPI 스키마에서 `openapi-typescript`로 웹의 타입을 생성합니다. API를 바꾸면 웹 타입도 같이 갱신합니다.
 
@@ -758,6 +761,7 @@ web/src/
 - **로컬 경로 표시:** 출처의 `C:\…` 경로는 복사 버튼을 제공합니다. 브라우저가 로컬 파일을 직접 열 수는 없으므로 링크로 만들지 않고, Windows에서는 "폴더에서 보기" 버튼으로 `chanjin-sync://reveal?k=<path_key의 SHA-256>`을 엽니다(10.2).
 - **입력 보존:** 보내지 못한 질문(401, 네트워크 오류)은 대화별로 `sessionStorage`에 남겨 다시 열면 채웁니다.
 - **접근성:** 스트리밍 답변 영역은 `aria-live="polite"`, 인용 칩은 버튼 요소로 만들어 키보드로 조작할 수 있게 합니다. 한글 조합 중 Enter는 전송하지 않습니다.
+- **채팅 화면 구현(`web/src/features/chat/`):** `ChatPage`(배치, 대화 불러오기, 768px 미만 서랍), `ConversationList`(이름 변경·삭제 확인), `AnswerMarkdown`(마크다운, 인용 칩. `[n]`은 remark 플러그인이 mdast의 text 노드에서만 바꾸므로 `code`·`inlineCode` 안은 그대로), `SourcePanel`(출처 항목, 문서 상세 링크 `/documents/{id}?chunk={chunk_id}`), `FeedbackBar`, `ChatFilters`. 다시 시도는 실패한 질문·답변 말풍선을 지우고 같은 질문·필터를 같은 대화로 다시 보냅니다(실패한 메시지는 DB에 `error`로 남음). "폴더에서 보기"의 `k`는 브라우저가 `crypto.subtle`로 계산합니다(path\_key 식은 10.2와 같음).
 
 ### 9.3 "지금 동기화" 버튼
 
@@ -967,6 +971,7 @@ web/src/
 | 실제 문서 | 실제 문서 폴더에서 파서·청커가 깨지지 않는지(개수와 비율만 확인) | pytest `samples` 마커. 기본 실행에서 빼고, `SAMPLE_DOCS_DIRS`(폴더 여러 개, Windows는 `;`로 구분)가 있으면 `verify.sh`가 `pytest -m samples`를 따로 실행. 내용·파일명은 저장소와 로그에 남기지 않음 |
 | 통합 | Hybrid SQL, 작업 큐와 일일 한도(버전당 1회 차감, 청크 임베딩 재사용, 청크 상한), 처리 중 새 버전 도착 시 결과 폐기, 청크 교체 트랜잭션, 영구 삭제와 인용 가림 | Docker의 ParadeDB 테스트 DB(`deploy/compose.test.yaml`, 포트 5433, tmpfs)에 pytest 실행. `scripts/verify.sh`가 띄우고 `TEST_DATABASE_URL`을 넘김. 테스트마다 트랜잭션 롤백 |
 | API | 인증, Sync API, SSE 이벤트 순서(일반, 찾지 못함, 요약, 오류, 409) | httpx `AsyncClient`, Provider는 Fake 구현(고정 벡터·고정 답변) |
+| E2E | 화면 조작·화면 결과·백엔드 로그(`waitForBackendLog`) | Playwright + 설치된 Chrome(`web/e2e`). 모델 오류는 질문에 `[[fake-error-once:<code>]]`(`rate_limited`·`provider_unavailable`·`provider_auth`) 표식을 넣어 재현합니다. Fake LLM이 그 질문의 첫 모델 호출에서만 해당 예외를 내므로 "다시 시도"가 성공합니다(`PROVIDER=fake` 전용) |
 | Agent | 스캔, 해시 캐시, 재시도 큐, 잠긴 파일, 프로토콜 인자 검증(`run`, `reveal`의 해시 형식과 루트 밖 경로 거절) | 임시 폴더와 가짜 서버 |
 | 웹 | SSE 파서, 인용 칩, 이미지·외부 링크 차단, 동기화 버튼 흐름(실행 중, 60초 비활성화), 범위 변경 확인 창 | Vitest + MSW |
 | 품질 회귀 | 검색·답변 지표 | `rag-eval run`(평가셋 30\~50문항, PRD 8장 지표). 청킹, 프롬프트, 모델, 재정렬 설정을 바꿀 때마다 실행해 이전 실행과 비교 |

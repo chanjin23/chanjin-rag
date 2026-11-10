@@ -62,6 +62,8 @@ export type DoneEvent = {
 };
 
 export type ChatEvent =
+  /** 응답 헤더 X-Conversation-Id. SSE 이벤트보다 먼저 한 번 낸다(새 대화의 ID를 바로 알 수 있게) */
+  | { type: "conversation"; conversation_id: number }
   | { type: "status"; stage: Stage; progress?: Progress }
   | { type: "sources"; sources: Source[] }
   | { type: "token"; text: string }
@@ -92,6 +94,9 @@ export async function* sendMessage(
     body: JSON.stringify(body),
     signal,
   });
+
+  const header = Number(res.headers.get("X-Conversation-Id"));
+  if (Number.isInteger(header) && header > 0) yield { type: "conversation", conversation_id: header };
 
   for await (const { event, data } of readSse(res, signal)) {
     const payload: unknown = JSON.parse(data);

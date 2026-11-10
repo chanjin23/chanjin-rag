@@ -7,11 +7,14 @@
 
 from fastapi import APIRouter
 
-from app.api import auth, chat, health, sync
+from app.api import auth, chat, conversations, feedback, health, index, sync
 from app.api.deps import WEB_API_DEPENDENCIES
 
 web_router = APIRouter(dependencies=WEB_API_DEPENDENCIES)
 web_router.include_router(chat.router)
+web_router.include_router(conversations.router)
+web_router.include_router(feedback.router)
+web_router.include_router(index.router)
 
 api_router = APIRouter(prefix="/api")
 api_router.include_router(health.router)

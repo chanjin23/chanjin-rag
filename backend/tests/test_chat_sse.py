@@ -463,3 +463,22 @@ async def test_query_log_saved_with_coverage(
     ).scalar_one()
     assert qlog.not_found is True and qlog.retried is True and qlog.grade == "insufficient"
     assert qlog.coverage["total_docs"] == 4
+
+
+async def test_fake_error_marker_fails_once_then_answers(
+    chat_client: httpx.AsyncClient, session: AsyncSession
+) -> None:
+    """E2E 오류 재현 표식: 같은 질문의 첫 요청만 실패하고(다시 시도 가능) 다시 보내면 답한다."""
+    await seed_corpus(session)
+    question = "알파 프로젝트 마감일 [[fake-error-once:provider_unavailable]] pytest-once"
+    res, events = await ask(chat_client, question)
+    assert names(events)[-1] == "error"
+    assert events[-1][1] == {
+        "code": "provider_unavailable",
+        "message": "모델 서버에 연결하지 못했습니다",
+        "retryable": True,
+    }
+    conv = int(res.headers["X-Conversation-Id"])
+    _, again = await ask(chat_client, question, conv)
+    assert names(again)[-1] == "done"
+    assert again[-1][1]["not_found"] is False

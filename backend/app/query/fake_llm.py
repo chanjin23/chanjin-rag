@@ -11,6 +11,11 @@ E2E와 개발 서버에서 그래프 전체 흐름을 확인할 수 있다.
 | retry\\_rewrite | 질문 그대로 + 토큰을 이은 키워드 질의 |
 | generate | 질문 토큰이 가장 많이 겹치는 자료의 가장 관련 있는 문장 + 그 자료 번호 인용 |
 | summarize\\_map / reduce | 자료 앞부분을 잘라 만든 요약 문장 + `[1]` |
+
+오류 재현(E2E·개발): 질문에 `[[fake-error-once:<code>]]`
+(code: `rate_limited`, `provider_unavailable`, `provider_auth`)가 있으면 그 질문의 첫 모델
+호출에서 해당 Provider 예외를 던진다. 같은 질문을 다시 보내면(다시 시도) 정상으로 답한다.
+기억은 프로세스 안에만 둔다. Fake Provider에서만 쓰인다.
 """
 
 import json
@@ -19,10 +24,31 @@ from collections.abc import Sequence
 
 from app.ingest.tokenize import bm25_tokens
 from app.providers.base import ChatMessage
+from app.providers.errors import ProviderAuthError, ProviderError, ProviderUnavailable, RateLimited
 from app.query import prompts
 from app.query.summary_target import wants_summary
 
 SUFFICIENT_RATIO = 0.5
+_FAKE_ERROR_RE = re.compile(r"\[\[fake-error-once:(\w+)\]\]")
+_FAKE_ERRORS: dict[str, type[ProviderError]] = {
+    "rate_limited": RateLimited,
+    "provider_unavailable": ProviderUnavailable,
+    "provider_auth": ProviderAuthError,
+}
+_failed_once: set[str] = set()
+
+
+def _maybe_fail(question: str) -> None:
+    m = _FAKE_ERROR_RE.search(question)
+    if m is None or question in _failed_once:
+        return
+    error = _FAKE_ERRORS.get(m.group(1))
+    if error is None:
+        return
+    _failed_once.add(question)
+    raise error(f"fake {m.group(1)}")
+
+
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。])\s+|\n+")
 
 
@@ -59,6 +85,8 @@ def fake_query_responder(messages: Sequence[ChatMessage]) -> str | None:
     question = prompts.question_of(user)
     materials = prompts.parse_materials(user)
 
+    _maybe_fail(question)
+    question = _FAKE_ERROR_RE.sub("", question).strip()
     if task == prompts.TASK_REWRITE:
         intent = "summarize" if wants_summary(question) else "qa"
         return json.dumps(

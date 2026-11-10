@@ -20,7 +20,6 @@
 
 import asyncio
 import json
-import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -35,6 +34,12 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
+from app.api.conversations import (
+    create_conversation,
+    get_conversation,
+    make_title,
+    parse_conversation_id,
+)
 from app.api.deps import DbSession
 from app.api.errors import ApiError
 from app.core.config import get_settings
@@ -61,7 +66,6 @@ router = APIRouter(tags=["chat"])
 log = get_logger(__name__)
 
 KST = ZoneInfo("Asia/Seoul")
-TITLE_CHARS = 40
 HISTORY_TURNS = 6  # 최근 6턴(질문 + 답변 쌍, TRD 7.1 QueryState.history)
 STREAMING_STALE = timedelta(minutes=2)
 NEW_CONVERSATION = "new"
@@ -167,28 +171,15 @@ def _event(name: str, data: object) -> dict[str, str]:
     return {"event": name, "data": json.dumps(data, ensure_ascii=False)}
 
 
-def make_title(text: str) -> str:
-    flat = re.sub(r"\s+", " ", text).strip()
-    return flat[:TITLE_CHARS]
-
-
 async def _conversation(db: AsyncSession, conversation_id: str, text: str) -> Conversation:
+    """`new`면 대화를 만들고(제목은 질문 앞 40자), 아니면 찾아서 잠근다. 제목이 빈 대화(`POST
+    /conversations`로 만든 빈 대화)는 첫 질문으로 제목을 채운다."""
     if conversation_id == NEW_CONVERSATION:
-        conv = Conversation(title=make_title(text))
-        db.add(conv)
-        await db.flush()
-        log.info("conversation.created", conversation_id=conv.id)
-        return conv
-    if not conversation_id.isdigit():
-        raise ApiError(404, "conversation_not_found", "대화를 찾을 수 없습니다")
-    found = (
-        await db.execute(
-            select(Conversation).where(Conversation.id == int(conversation_id)).with_for_update()
-        )
-    ).scalar_one_or_none()
-    if found is None:
-        raise ApiError(404, "conversation_not_found", "대화를 찾을 수 없습니다")
-    return found
+        return await create_conversation(db, make_title(text), source="message")
+    conv = await get_conversation(db, parse_conversation_id(conversation_id), lock=True)
+    if not conv.title:
+        conv.title = make_title(text)
+    return conv
 
 
 async def _abort_stale_streaming(db: AsyncSession, conversation_id: int) -> int:

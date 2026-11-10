@@ -113,7 +113,9 @@ test("세션이 만료되면 입력 중인 질문이 보존된다", async ({ pag
 
   // 4) 그대로 보내면 정상 처리된다(질의 그래프가 끝까지 돌아 답변이 완료된다)
   await input.press("Enter");
-  await expect(page.getByText(question, { exact: true })).toBeVisible();
+  // 사이드바 대화 제목에도 같은 글자가 생기므로 메시지 영역 안에서 찾는다
+  const messages = page.getByRole("log", { name: "대화 내용" });
+  await expect(messages.getByText(question, { exact: true })).toBeVisible();
   await expect(input).toHaveValue("");
   await expect(page.getByText(/^\d+ms$/)).toBeVisible({ timeout: 10_000 });
   const received = await waitForBackendLog(
