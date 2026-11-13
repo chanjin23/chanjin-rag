@@ -88,6 +88,15 @@ def read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def local_path(raw: str) -> str:
+    """설정의 Windows 경로(`C:\\...`)를 WSL 등 Linux에서 `/mnt/c/...`로 바꾼다.
+    Windows Smart App Control 때문에 루프를 WSL에서 돌릴 수 있도록 한다."""
+    m = re.match(r"^([A-Za-z]):[\\/](.*)$", raw)
+    if IS_WINDOWS or not m:
+        return raw
+    return f"/mnt/{m.group(1).lower()}/" + m.group(2).replace("\\", "/")
+
+
 def write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
@@ -949,6 +958,7 @@ def main() -> int:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     cfg = read_json(LOOP_DIR / "config.json")
+    cfg["sample_docs_dirs"] = [local_path(d) for d in cfg["sample_docs_dirs"]]
     if args.max_attempts:
         cfg["max_attempts"] = args.max_attempts
     tasks = load_tasks()
