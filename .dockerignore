@@ -1,0 +1,26 @@
+# 이미지 빌드 컨텍스트(저장소 루트)에서 뺄 것 (deploy/compose.yaml의 build.context: ..)
+.git
+.loop
+.env
+.env.*
+!.env.example
+**/.venv
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/node_modules
+web/dist
+web/e2e/.logs
+web/e2e/.results
+web/e2e/.report
+web/e2e/.auth
+web/e2e/.tmp
+web/test-results
+var
+loop
+docs
+*.dump
+*.dump.age
+*.age-key

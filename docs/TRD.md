@@ -913,6 +913,7 @@ web/src/
 | `PROVIDER` | `nvidia` | `nvidia` \| `fake`. `fake`는 결정적인 가짜 구현(14장). `APP_ENV=test`에서는 `fake`만 허용 |
 | `DATABASE_URL` | `postgresql+psycopg://rag:rag@localhost:5432/rag` | 테스트·E2E는 `TEST_DATABASE_URL`(테스트 DB, 5433)을 씁니다 |
 | `TZ` | `Asia/Seoul` | 한도 초기화와 예약 작업 기준 |
+| `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | `rag`, `rag`, `rag` | 운영 Compose 전용. `db` 계정과 컨테이너의 `DATABASE_URL`(`@db:5432`)을 함께 만듭니다(`--env-file .env`). 운영 비밀번호는 긴 난수 |
 | `BACKUP_AGE_RECIPIENT` | | age 공개키 |
 | `BACKUP_KEEP_ON_VM` | `3` | |
 | `BACKUP_DIR` | (비움: 저장소 `var/backups`) | VM 백업 폴더(`backups/`). Worker와 API가 같은 폴더를 씀 |
@@ -936,6 +937,7 @@ web/src/
 - VM에서 `git pull` → `docker compose build` → `docker compose up -d` 순서로 배포합니다. arm64 이미지를 VM에서 직접 빌드하므로 크로스 빌드와 레지스트리가 필요 없습니다.
 - DB 스키마는 `migrate` 서비스가 `alembic upgrade head`로 올립니다. 되돌리기 어려운 마이그레이션 전에는 수동 백업을 먼저 받습니다.
 - 개발은 Windows PC의 Docker Desktop에서 같은 Compose 파일로 `db`만 띄우고, `api`와 `worker`는 uv로 직접 실행합니다.
+- 구현: `deploy/compose.yaml`(빌드 컨텍스트는 저장소 루트), `backend/Dockerfile`(api·worker·migrate 공용, 빌드는 `api` 한 곳에만 두고 나머지는 같은 이미지를 씀), `web/Dockerfile`(빌드 후 Nginx), `deploy/nginx.conf`, `deploy/postgres/tuning.conf`(12.5 조정값, DB 첫 초기화 때 `postgresql.conf`에 include), `deploy/scripts/deploy.sh`. 컨테이너에서는 `APP_ENV=prod`, `LOG_FORMAT=json`, `UPLOAD_TMP_DIR=/data/tmp`, `BACKUP_DIR=/data/backups`를 Compose가 덮어씁니다. `.env`가 없어도 `docker compose config`·`build`는 됩니다(`env_file`의 `required: false`).
 
 ### 12.4 모니터링
 

@@ -1,0 +1,144 @@
+# 운영 구성 (TRD 3.1~3.3, 12.3). VM에서 저장소 루트 기준:
+#   bash deploy/scripts/deploy.sh          # git pull → build → up -d
+#   docker compose -f deploy/compose.yaml --env-file .env up -d
+# 개발 PC에서는 db만 띄우고 api·worker는 uv로 직접 실행한다:
+#   docker compose -f deploy/compose.yaml --env-file .env up -d db
+#
+# - 비밀값과 설정은 저장소 루트 .env(TRD 12.1). 없어도 구성 검사·빌드는 된다(required: false).
+# - DB 접속 정보(POSTGRES_*)는 Compose 변수 치환으로 db와 DATABASE_URL에 함께 쓴다.
+#   치환 값은 `--env-file .env`로 넘긴다(넘기지 않으면 기본값 rag/rag/rag).
+# - 공개 포트는 없다. web만 127.0.0.1:8080에 바인딩하고 `tailscale serve`가 HTTPS로 노출한다(3.3).
+name: chanjin-rag
+
+x-backend-env: &backend-env
+  TZ: Asia/Seoul
+  APP_ENV: prod
+  LOG_FORMAT: json
+  # 컨테이너 안에서는 db 서비스 이름으로 접속한다(.env의 localhost 주소를 덮어씀)
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD:-rag}@db:5432/${POSTGRES_DB:-rag}
+  UPLOAD_TMP_DIR: /data/tmp
+  BACKUP_DIR: /data/backups
+  DISK_CHECK_PATH: /data/tmp
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+# api·worker·migrate는 같은 이미지. 같은 태그를 여러 서비스가 동시에 빌드하면 충돌하므로
+# 빌드는 api에만 두고, 나머지는 그 이미지를 쓴다(내려받지 않음).
+x-backend: &backend
+  image: chanjin-rag-backend:latest
+  pull_policy: never
+  env_file:
+    - path: ../.env
+      required: false
+  environment: *backend-env
+  logging: *logging
+
+services:
+  db:
+    image: paradedb/paradedb:0.26.5-pg17
+    restart: unless-stopped
+    mem_limit: 4g
+    shm_size: 256m
+    environment:
+      TZ: Asia/Seoul
+      POSTGRES_USER: ${POSTGRES_USER:-rag}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rag}
+      POSTGRES_DB: ${POSTGRES_DB:-rag}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # 조정값(TRD 12.5). 초기화 폴더의 하위 폴더는 무시되므로 파일 단위로 넣는다
+      - ./postgres/tuning.conf:/etc/postgresql/tuning.conf:ro
+      - ./postgres/initdb/10-include-tuning.sh:/docker-entrypoint-initdb.d/zz_10-include-tuning.sh:ro
+    healthcheck:
+      # 초기화 중 임시 서버는 TCP를 열지 않으므로 127.0.0.1로 최종 서버만 확인한다
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+    logging: *logging
+
+  migrate:
+    <<: *backend
+    # 1회 실행: alembic upgrade head 후 종료(TRD 3.2, 12.3)
+    command: ["rag-backend", "migrate"]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    <<: *backend
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    pull_policy: missing
+    restart: unless-stopped
+    mem_limit: 1536m
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --proxy-headers
+      - --forwarded-allow-ips
+      - "*"
+    volumes:
+      - tmp:/data/tmp
+      - backups:/data/backups
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4)"
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  worker:
+    <<: *backend
+    restart: unless-stopped
+    mem_limit: 3g
+    command: ["rag-backend", "worker"]
+    stop_grace_period: 30s
+    volumes:
+      - tmp:/data/tmp
+      - backups:/data/backups
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  web:
+    build:
+      context: ..
+      dockerfile: web/Dockerfile
+    image: chanjin-rag-web:latest
+    restart: unless-stopped
+    mem_limit: 128m
+    environment:
+      TZ: Asia/Seoul
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    logging: *logging
+
+volumes:
+  pgdata:
+  tmp:
+  backups:
