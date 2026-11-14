@@ -1,4 +1,4 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { type UseQueryResult, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type FormEvent,
   type KeyboardEvent,
@@ -33,7 +33,11 @@ import {
 import { ConversationList, displayTitle } from "./ConversationList";
 import { clearDraft, loadDraft, saveDraft } from "./draft";
 import { FeedbackBar } from "./FeedbackBar";
-import { fileName, formatMonthDay } from "./format";
+import { formatMonthDay } from "@/lib/time";
+import { HEALTH_KEY } from "@/api/health";
+import { getSetupStatus, SETUP_STATUS_KEY, type SetupStatus } from "@/api/setup";
+import { SetupChecklist } from "@/features/setup/SetupChecklist";
+import { fileName } from "./format";
 import { type PanelFocus, SourcePanel } from "./SourcePanel";
 import { type ChatMessage, fromStored, useChatStream } from "./useChatStream";
 
@@ -197,6 +201,31 @@ export function ChatPage() {
   return <ChatView key={viewKey} viewKey={viewKey} conversationId={conversationId} />;
 }
 
+/**
+ * 메시지가 없을 때: 문서가 0개면 첫 실행 체크리스트(F-18), 아니면 질문 안내.
+ * 체크리스트 상태를 읽는 중이면 로딩 표시, 읽지 못하면 질문 안내와 함께 확인 실패를 알린다.
+ */
+function EmptyState({ setup }: { setup: UseQueryResult<SetupStatus> }) {
+  if (setup.isPending) {
+    return (
+      <p className="pt-20 text-center text-sm text-slate-400" data-testid="empty-loading">
+        불러오는 중…
+      </p>
+    );
+  }
+  if (setup.data?.documents === 0) return <SetupChecklist status={setup.data} />;
+  return (
+    <div className="pt-20 text-center text-sm text-slate-500">
+      <p>내 문서에 대해 질문해 보세요. 답변에는 출처가 함께 표시됩니다.</p>
+      {setup.isError && (
+        <p className="mt-2 text-xs text-slate-400" data-testid="setup-status-error">
+          첫 실행 상태를 확인하지 못했습니다. 잠시 후 새로 고쳐 보세요.
+        </p>
+      )}
+    </div>
+  );
+}
+
 function ChatView({ conversationId, viewKey }: { conversationId: string; viewKey: string }) {
   const navigate = useNavigate();
   const location = useLocation();
@@ -233,6 +262,9 @@ function ChatView({ conversationId, viewKey }: { conversationId: string; viewKey
   const onSettled = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: CONVERSATIONS_KEY, exact: true });
     void queryClient.invalidateQueries({ queryKey: INDEX_COVERAGE_KEY });
+    // 모델 오류(특히 provider_auth)를 전역 배너에 바로 보이게 상태 점검을 다시 읽는다(TRD 9.1)
+    void queryClient.invalidateQueries({ queryKey: HEALTH_KEY });
+    void queryClient.invalidateQueries({ queryKey: SETUP_STATUS_KEY });
   }, [queryClient]);
 
   const { messages, setMessages, stage, progress, isStreaming, send, retry, stop, setFeedback } =
@@ -250,6 +282,8 @@ function ChatView({ conversationId, viewKey }: { conversationId: string; viewKey
     retry: false,
   });
   const conversations = useQuery({ queryKey: CONVERSATIONS_KEY, queryFn: listConversations });
+  // 문서가 0개면 빈 안내 대신 첫 실행 체크리스트(F-18, TRD 9.1)
+  const setup = useQuery({ queryKey: SETUP_STATUS_KEY, queryFn: getSetupStatus, retry: 1 });
   const listed = conversations.data?.find((c) => c.id === numericId);
   const loaded = useRef(false);
   useEffect(() => {
@@ -369,9 +403,7 @@ function ChatView({ conversationId, viewKey }: { conversationId: string; viewKey
             <p className="pt-20 text-center text-sm text-slate-500">대화를 찾을 수 없습니다.</p>
           )}
           {messages.length === 0 && !detail.isError && !detail.isLoading && (
-            <p className="pt-20 text-center text-sm text-slate-500">
-              내 문서에 대해 질문해 보세요. 답변에는 출처가 함께 표시됩니다.
-            </p>
+            <EmptyState setup={setup} />
           )}
           {messages.map((m) => (
             <div key={m.id} className={cn("flex", m.role === "user" ? "justify-end" : "justify-start")}>

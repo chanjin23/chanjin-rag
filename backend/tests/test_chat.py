@@ -9,7 +9,17 @@ CSRF_HEADERS = {"X-Requested-With": "fetch", "Origin": "https://testserver"}
 
 
 def test_health() -> None:
-    assert TestClient(app).get("/api/health").json() == {"status": "ok"}
+    # 공개 요약: 프로세스가 살아 있으면 항상 200, status "ok". 이상은 degraded·이상 코드만 알리고
+    # 세부(checks: 모델 이름, 디스크 크기 등)는 세션이 필요한 /health/details에서만 준다
+    client = TestClient(app)
+    res = client.get("/api/health")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "ok"
+    assert set(body) == {"status", "degraded", "issues"}
+    assert isinstance(body["degraded"], bool)
+    assert all(set(i) == {"code"} for i in body["issues"])
+    assert client.get("/api/health/details").status_code == 401
 
 
 async def test_post_message_streams_trd_events_in_order(

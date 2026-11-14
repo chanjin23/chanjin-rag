@@ -635,6 +635,15 @@ async def test_rate_limited_job_requeued_without_recharge(
 ) -> None:
     set_env(monkeypatch, JOB_MAX_ATTEMPTS="3")
     runner.settings = get_settings()
+    # 이 테스트는 시계를 1시간 남짓 앞으로 돌리며 같은 날의 한도 사용량을 확인한다. 한국 시간 자정
+    # 근처에 실행하면 날짜가 바뀌어 사용량이 0으로 보이므로, 그럴 때는 다음 날 0시 1분에서 시작한다
+    # (실제 시각보다 뒤이므로 DB now()로 만든 작업의 run_after보다 여전히 앞선다).
+    if quota_day(clock.now) != quota_day(clock.now + timedelta(minutes=90)):
+        kst = clock.now.astimezone(ZoneInfo("Asia/Seoul"))
+        next_day = datetime.combine(
+            kst.date() + timedelta(days=1), datetime.min.time(), tzinfo=kst.tzinfo
+        )
+        clock.now = (next_day + timedelta(minutes=1)).astimezone(UTC)
     doc_id = await upload(sm, tmp_path, "요약.md", MD_THREE_SECTIONS)
     await run_prep(runner)
 

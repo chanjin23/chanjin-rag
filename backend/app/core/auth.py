@@ -194,6 +194,8 @@ async def resolve_api_token(session: AsyncSession, raw: str, now: datetime) -> A
     if token.revoked_at is not None:
         return "revoked"
     token.last_used_at = now
+    if token.first_used_at is None:
+        token.first_used_at = now
     await session.flush()
     return token
 

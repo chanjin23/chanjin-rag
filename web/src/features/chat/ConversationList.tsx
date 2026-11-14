@@ -9,7 +9,7 @@ import {
   renameConversation,
 } from "@/api/conversations";
 import { cn } from "@/lib/cn";
-import { formatRelative } from "./format";
+import { formatRelative } from "@/lib/time";
 
 /** 왼쪽 대화 목록 (F-11): 새 대화, 이름 변경, 삭제. */
 

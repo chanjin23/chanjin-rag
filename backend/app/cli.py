@@ -175,14 +175,16 @@ def ingest_local(
     from app.ingest.local import ingest_local as run_ingest
     from app.jobs.runner import JobRunner
     from app.providers.factory import create_embedding_provider
+    from app.providers.monitor import configure_recorder, monitored_embedder
 
     _setup_logging()
 
     async def main() -> LocalIngestReport:
         engine = create_engine()
-        provider = create_embedding_provider() if process else None
+        provider = monitored_embedder(create_embedding_provider()) if process else None
         try:
             sessionmaker = create_sessionmaker(engine)
+            configure_recorder(sessionmaker)  # /health의 Provider 상태(TRD 12.4)
             runner = JobRunner(sessionmaker, provider) if provider is not None else None
             return await run_ingest(sessionmaker, folder, runner=runner)
         finally:
@@ -215,13 +217,15 @@ def worker(
     from app.jobs.runner import JobRunner
     from app.jobs.worker import Worker
     from app.providers.factory import create_embedding_provider
+    from app.providers.monitor import configure_recorder, monitored_embedder
 
     _setup_logging()
 
     async def main() -> None:
         engine = create_engine()
-        provider = create_embedding_provider()
+        provider = monitored_embedder(create_embedding_provider())
         sessionmaker = create_sessionmaker(engine)
+        configure_recorder(sessionmaker)  # /health의 Provider 상태(TRD 12.4)
         w = Worker(JobRunner(sessionmaker, provider), sessionmaker, name=name)
         loop = asyncio.get_running_loop()
         if sys.platform != "win32":

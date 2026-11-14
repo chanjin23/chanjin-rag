@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { NavLink, Outlet, useNavigate } from "react-router";
 import { fetchMe, logout, ME_QUERY_KEY } from "@/api/auth";
+import { GlobalBanner } from "@/components/GlobalBanner";
 import { cn } from "@/lib/cn";
 
 const NAV = [
@@ -55,6 +56,7 @@ export function AppLayout() {
           </button>
         </div>
       </header>
+      <GlobalBanner />
       <main className="min-h-0 flex-1">
         <Outlet />
       </main>

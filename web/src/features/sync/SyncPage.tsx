@@ -17,7 +17,8 @@ import {
   type SyncStatus,
   saveSyncSettings,
 } from "@/api/sync";
-import { formatRelative, isWindows } from "@/features/chat/format";
+import { isWindows } from "@/features/chat/format";
+import { formatRelative } from "@/lib/time";
 import { PURGE_NOTICE } from "@/features/documents/DocumentsPage";
 import { cn } from "@/lib/cn";
 

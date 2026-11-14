@@ -103,6 +103,11 @@ class Settings(BaseSettings):
     local_deleted_retention_days: int = 30
     mass_delete_guard_ratio: float = 0.2
     sync_run_stale_minutes: int = 10
+    # 상태 점검(TRD 8.3 `/health`, 12.4): Worker 하트비트가 이 시간(초) 넘게 없으면 이상,
+    # 디스크 여유가 이 크기(GB) 미만이면 경고. 디스크 확인 경로를 비우면 업로드 임시 폴더
+    disk_check_path: str | None = None
+    worker_stale_seconds: int = 90
+    disk_min_free_gb: float = 10.0
 
     # DB. 테스트·E2E는 TEST_DATABASE_URL(5433의 테스트 DB)을 DATABASE_URL로 넘긴다
     database_url: str = "postgresql+psycopg://rag:rag@localhost:5432/rag"
@@ -118,6 +123,10 @@ class Settings(BaseSettings):
     @property
     def upload_tmp_path(self) -> Path:
         return Path(self.upload_tmp_dir) if self.upload_tmp_dir else REPO_ROOT / "var" / "tmp"
+
+    @property
+    def disk_check_target(self) -> Path:
+        return Path(self.disk_check_path) if self.disk_check_path else self.upload_tmp_path
 
     @property
     def csrf_trusted_origin_list(self) -> list[str]:

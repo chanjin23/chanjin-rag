@@ -17,7 +17,7 @@ import {
   type MetricKey,
   reviewFeedback,
 } from "@/api/eval";
-import { formatRelative } from "@/features/chat/format";
+import { formatRelative } from "@/lib/time";
 import { cn } from "@/lib/cn";
 
 /**

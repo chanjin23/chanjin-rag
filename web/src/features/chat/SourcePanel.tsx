@@ -3,7 +3,8 @@ import { Link } from "react-router";
 import type { Source } from "@/api/chat";
 import { cn } from "@/lib/cn";
 import { type DetailState, documentDetailHref } from "@/features/documents/links";
-import { fileName, formatDate, formatLocation, isWindows, revealUrl } from "./format";
+import { formatDate } from "@/lib/time";
+import { fileName, formatLocation, isWindows, revealUrl } from "./format";
 
 /**
  * 출처 패널 (F-10, TRD 9.1, 9.2 "로컬 경로 표시").

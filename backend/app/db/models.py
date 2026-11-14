@@ -315,6 +315,27 @@ class WorkerHeartbeat(Base):
     info: Mapped[dict[str, Any]] = jsonb(EMPTY_JSON_OBJECT)
 
 
+class ProviderStatus(Base):
+    """모델 호출 종류(`llm`·`embed`·`rerank`)마다 마지막 성공·실패 시각과 오류 코드(TRD 12.4).
+
+    API와 Worker가 각자 기록하고 `/health`가 읽는다(`app.providers.monitor`).
+    `last_error_code`는 TRD 7.3 오류 코드(`provider_auth`, `rate_limited` 등).
+    """
+
+    __tablename__ = "provider_status"
+
+    kind: Mapped[str] = mapped_column(Text, primary_key=True)
+    model: Mapped[str | None] = mapped_column(Text)
+    last_success_at: Mapped[datetime | None] = timestamptz()
+    last_failure_at: Mapped[datetime | None] = timestamptz()
+    last_error_code: Mapped[str | None] = mapped_column(Text)
+    last_status_code: Mapped[int | None] = mapped_column(Integer)
+    # 같은 오류 코드로 이어진 연속 실패의 첫 시각. 성공하면 NULL.
+    # `/health`의 `since`(배너가 실패마다 다시 뜨지 않게)
+    failing_since: Mapped[datetime | None] = timestamptz()
+    updated_at: Mapped[datetime] = timestamptz(nullable=False, now=True)
+
+
 # ---------------------------------------------------------------------------
 # 5.2 인증
 # ---------------------------------------------------------------------------
@@ -361,6 +382,8 @@ class ApiToken(Base):
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = timestamptz(nullable=False, now=True)
     last_used_at: Mapped[datetime | None] = timestamptz()
+    # Agent 첫 접속 시각(첫 실행 체크리스트, TRD 8.3 `/setup/status`)
+    first_used_at: Mapped[datetime | None] = timestamptz()
     revoked_at: Mapped[datetime | None] = timestamptz()
 
 

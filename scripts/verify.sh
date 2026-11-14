@@ -51,8 +51,9 @@ uv run ruff format --check .
 uv run mypy backend/app agent/rag_agent eval/rag_eval
 
 cd "$ROOT/web"
-step "4/5 웹 타입 검사와 빌드"
+step "4/5 웹 타입 검사, 단위 테스트, 빌드"
 corepack pnpm install --frozen-lockfile --silent
+corepack pnpm test
 corepack pnpm build
 
 step "5/5 E2E (백엔드 :8001 + 웹 :5174 + Chrome)"

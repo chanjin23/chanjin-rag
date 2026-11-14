@@ -11,12 +11,16 @@ from app.api.errors import install_error_handlers
 from app.api.router import api_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
-from app.db.engine import dispose_engine
+from app.db.engine import dispose_engine, get_sessionmaker
+from app.providers.monitor import configure_recorder
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    # 채팅의 모델 호출 결과를 provider_status에 남긴다(`/health`, TRD 12.4)
+    configure_recorder(get_sessionmaker())
     yield
+    configure_recorder(None)
     await dispose_engine()
 
 

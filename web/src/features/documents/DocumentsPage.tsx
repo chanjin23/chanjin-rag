@@ -10,7 +10,7 @@ import {
   reprocessDocument,
 } from "@/api/documents";
 import { INDEX_COVERAGE_KEY } from "@/api/conversations";
-import { formatRelative } from "@/features/chat/format";
+import { formatRelative } from "@/lib/time";
 import { cn } from "@/lib/cn";
 import {
   canReprocess,

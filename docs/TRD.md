@@ -230,6 +230,7 @@ chanjin-rag/
 | `jobs` | `id`, `type`, `document_id`, `sha256`, `status`, `priority`, `attempts`, `run_after`, `locked_at`, `last_error` | `type`: `extract`, `index`, `embed`. `status`: `queued`, `running`, `done`(버전이 바뀌어 결과를 버린 경우 포함), `failed`(재시도 초과). `priority`는 파일 수정 시각(`timestamptz`). `sha256`은 작업 대상 버전으로, 끝날 때 문서의 현재 해시와 다르면 결과를 버림 |
 | `embed_quota` | `day date`(PK), `used int`, `chunks_used int` | 한국 시간 기준 날짜별 사용량(파일 수, 청크 수). 새 날짜 행이 생기면 자연스럽게 초기화 |
 | `worker_heartbeats` | `name`(PK), `started_at`, `heartbeat_at`, `pid`, `info jsonb` | Worker 하트비트(12.4). Worker가 30초마다 갱신하고 `/health`가 읽음 |
+| `provider_status` | `kind`(PK: `llm`·`embed`·`rerank`), `model`, `last_success_at`, `last_failure_at`, `last_error_code`(7.3 코드), `last_status_code`, `failing_since`(같은 코드로 이어진 연속 실패의 첫 시각, 성공하면 NULL), `updated_at` | 모델 호출 마지막 성공·실패(12.4). API와 Worker가 기록하고 `/health`가 읽음 |
 | `sync_runs` | `id`, `source`(`schedule`·`web`·`cli`), `started_at`, `finished_at`, `heartbeat_at`, `status`(`running`·`succeeded`·`failed`·`abandoned`), `stats jsonb` | 동기화 실행 이력. 웹의 상태 화면이 사용. `stats`에 업로드 수, 지원하지 않는 형식으로 건너뛴 수, 읽지 못한 폴더, 보류된 삭제 판정을 담음 |
 
 **`location` 예시:** `{"page": 3}`, `{"sheet": "매출", "rows": [2, 41]}`, `{"slide": 7}`, `{"lines": [120, 168]}`
@@ -266,7 +267,7 @@ stateDiagram-v2
 | --- | --- | --- |
 | `users` | `id`, `username`, `password_hash`, `failed_logins`, `locked_until` | 1행. `rag-backend create-user` CLI로만 생성(비밀번호 변경·잠금 해제는 `rag-backend reset-password`) |
 | `sessions` | `id_hash`, `user_id`, `expires_at`, `last_seen_at` | 쿠키 값의 SHA-256만 저장 |
-| `api_tokens` | `id`, `name`, `token_hash`, `last_used_at`, `revoked_at` | Sync Agent용. `rag-backend create-token` CLI로 발급(평문은 발급 때 한 번만 출력) |
+| `api_tokens` | `id`, `name`, `token_hash`, `last_used_at`, `first_used_at`(Agent 첫 접속, 첫 실행 체크리스트), `revoked_at` | Sync Agent용. `rag-backend create-token` CLI로 발급(평문은 발급 때 한 번만 출력) |
 
 ### 5.3 대화, 로그, 평가
 
@@ -387,7 +388,7 @@ Worker는 하나의 프로세스에서 작업 루프와 APScheduler를 함께 �
 - 수정 파일의 재임베딩도 1개로 셉니다. 질문 임베딩은 세지 않습니다.
 - 한도 값은 `EMBED_DAILY_FILE_LIMIT` 설정으로 바꿀 수 있습니다.
 
-**재시도:** API 오류(429, 5xx, 타임아웃)는 tenacity로 지수 백오프합니다(최대 5회, 최대 대기 60초). openai SDK 자체 재시도는 끕니다. 끝까지 실패하면 Provider 전용 예외로 바꿉니다: 429 → `RateLimited`, 5xx·타임아웃·연결 실패 → `ProviderUnavailable`, 401·403 → `ProviderAuthError`(NVIDIA는 틀린 키에 403 `Authorization failed`를 돌려줌, 재시도하지 않음). 429가 계속되면 해당 작업을 `run_after`를 30분 뒤로 미뤄 반납합니다. LLM 스트리밍은 응답 스트림을 여는 데까지만 재시도합니다. 호출마다 `provider.call` 로그(종류, 모델, 지연, 상태 코드, 재시도 횟수. 본문·키 제외)를 남깁니다.
+**재시도:** API 오류(429, 5xx, 타임아웃)는 tenacity로 지수 백오프합니다(최대 5회, 최대 대기 60초). openai SDK 자체 재시도는 끕니다. 끝까지 실패하면 Provider 전용 예외로 바꿉니다: 429 → `RateLimited`, 5xx·타임아웃·연결 실패 → `ProviderUnavailable`, 401·403 → `ProviderAuthError`(NVIDIA는 틀린 키에 403 `Authorization failed`를 돌려줌, 재시도하지 않음), 402(크레딧·사용량 소진) → `ProviderQuotaExhausted`(`ProviderAuthError`의 하위, 오류 코드 `provider_auth`). 429가 계속되면 해당 작업을 `run_after`를 30분 뒤로 미뤄 반납합니다. LLM 스트리밍은 응답 스트림을 여는 데까지만 재시도합니다. 호출마다 `provider.call` 로그(종류, 모델, 지연, 상태 코드, 재시도 횟수. 본문·키 제외)를 남깁니다.
 
 **구현 세부(`backend/app/jobs/`, `backend/app/ingest/{intake,scope,local}.py`)**
 
@@ -708,7 +709,7 @@ NVIDIA API 실측값(13장)이 예산을 넘으면 rewrite 생략 조건을 넓�
 | POST | `/sync/held-deletions/apply` | 대량 삭제 보호로 보류된 판정을 다음 실행에서 적용 | F-02 |
 | POST | `/sync/run-requests` | "지금 동기화" 클릭 기록(로그만, 실행은 Agent) | F-03 |
 | GET | `/index/coverage` | 상태별 문서 수, 의미 검색 가능 수, 완료 예상일(대기 파일 수 ÷ 하루 한도) | F-18 |
-| GET | `/setup/status` | 첫 실행 체크리스트: 토큰 발급 여부, Agent 첫 접속 시각, 첫 동기화 완료 여부 | F-18 |
+| GET | `/setup/status` | 첫 실행 체크리스트: 사용자 존재, 토큰 발급 여부, Agent 첫 접속 시각, 첫 동기화 완료 여부, 문서 수 | F-18 |
 | GET | `/documents` | 목록(상태, 형식, 경로, 검색어, 로컬 삭제 여부 필터, 페이지네이션) | F-05 |
 | GET | `/documents/{id}` | 메타데이터와 위치별 추출 텍스트 | F-10 |
 | POST | `/documents/{id}/reprocess` | 실패 파일은 `needs_upload` 표시, 정상 파일은 sections에서 재청킹 | F-05 |
@@ -720,7 +721,8 @@ NVIDIA API 실측값(13장)이 예산을 넘으면 rewrite 생략 조건을 넓�
 | PUT | `/messages/{id}/feedback` | 좋아요·싫어요, 사유, 메모(다시 보내면 덮어씀). 실패 유형은 검토 화면에서 따로 붙임 | F-12 |
 | GET | `/eval/runs`, `/eval/runs/{id}` | 평가 실행 목록, 지표, 이전 실행과 비교 | F-13 |
 | GET·PATCH | `/feedback`, `/feedback/{id}` | 피드백 목록(`rating=-1`이면 싫어요만), 실패 유형 붙이기(`reviewed_at` 기록) | F-12 |
-| GET | `/health` | DB 연결, Worker 마지막 하트비트, 디스크 여유, NVIDIA API 마지막 성공·실패 시각과 오류 코드 | 운영 |
+| GET | `/health` | 공개 요약(인증 불필요): `status`, `degraded`, `issues[].code` | 운영 |
+| GET | `/health/details` | 세부(세션): DB 연결, Worker 마지막 하트비트, 디스크 여유, NVIDIA API 마지막 성공·실패 시각과 오류 코드, 배너용 이상 목록 | 운영 |
 
 - 인증이 필요한 API는 세션이 없거나 만료되면 401을 돌려줍니다. 웹은 입력 중인 질문을 보존한 채 로그인 화면으로 보내고, 로그인 후 원래 화면으로 돌아옵니다.
 - 대화(`app/api/conversations.py`): 목록은 `updated_at` 내림차순 `[{id, title, created_at, updated_at}]`. `POST /conversations`(`title`?)는 제목을 주지 않으면 빈 제목으로 만들고 첫 질문 앞 40자로 채웁니다(웹은 빈 제목을 "새 대화"로 표시). `GET /conversations/{id}`는 메시지마다 `id`, `role`, `content`, `status`, `citations`, `created_at`, `not_found`·`coverage`(질의 로그에서), `feedback`(`rating`, `reason`, `note`)을 줍니다. `PATCH`는 `title`(공백 정리 후 1\~200자, 빈 값 422). `DELETE`는 204이며 메시지·질의 로그·피드백을 외래 키 `ON DELETE CASCADE`로 함께 지웁니다. 숫자가 아니거나 없는 대화는 404 `conversation_not_found`. 로그: `conversation.created`(`source`: `message`·`api`), `conversation.renamed`(제목 글자 수), `conversation.deleted`(지운 메시지·질의 로그·피드백 수). 제목 원문은 로그에 남기지 않습니다.
@@ -730,6 +732,9 @@ NVIDIA API 실측값(13장)이 예산을 넘으면 rewrite 생략 조건을 넓�
 - 문서(`app/api/documents.py`): `GET /documents`는 `status`(여러 번 가능), `ext`(점 없이도 됨), `path`(폴더 앞부분, 폴더 경계로 자르고 대소문자 무시), `q`(경로·파일명 부분 일치, 대소문자 무시), `locally_deleted`, `page`(1부터), `page_size`(기본 50, 최대 200)를 받고 수정 시각 최신순 `{items, total, page, page_size, counts}`를 줍니다. `counts`는 필터와 무관한 상태별 개수와 `locally_deleted` 개수(화면 탭 숫자). 항목: `id`, `path`, `filename`, `ext`, `size`, `mtime`, `status`, `failure_code`, `failure_detail`, `locally_deleted`, `deleted_at`, `needs_upload`, `chunks`(청크 수), `updated_at`. `GET /documents/{id}`는 여기에 `sections`(`seq`, `location`, `heading_path`, `kind`, `text`)를 더합니다. `POST /documents/{id}/reprocess`: `failed`·`no_text`(또는 섹션이 없는 `ready`·`indexed`)는 `needs_upload=true`만 표시(상태·사유는 그대로, 다시 올라오면 새로 판정) → `action: needs_upload`. `ready`·`indexed`는 기다리는 `index`·`embed` 작업을 `done`으로 정리하고 상태를 `extracting`(처리 중)으로 바꾼 뒤 `index` 작업을 등록 → Worker가 sections에서 재청킹(같은 임베딩 입력이면 벡터 재사용, 같은 버전이라 한도도 다시 차감하지 않음) → `action: rechunk`. 그 밖의 상태(대기·처리 중·파일명만)는 409 `not_reprocessable`. `DELETE`는 204(6.5 구현). `GET /documents/suggest?prefix=`는 앞부분 바로 다음 단계까지의 폴더 경로(원래 표기, 최대 20개). 숫자가 아니거나 없는 문서는 404 `document_not_found`. 로그: `documents.listed`(쓴 필터 이름과 개수, 검색어 원문 없음), `documents.read`, `documents.suggested`, `documents.reprocess.requested`(문서 ID, 이전 상태, 방식, 실패 코드), `documents.purged`.
 - 동기화 범위 설정(`app/api/settings.py`, `app/sync/settings.py`): `GET`은 `allowed_root`, `roots`, `excludes`(`[{pattern, fixed}]`, 고정 제외가 `fixed: true`로 앞에), `max_file_mb`, `updated_at`. 미리보기·저장 본문은 `{roots, excludes}`(편집 가능한 패턴만. 고정 제외는 대소문자·구분자를 무시하고 걸러 저장하지 않음). 루트는 공백·끝 구분자를 정리하고 `path_key`가 같은 것은 하나만 남기며, 허용 폴더 하위가 아니면 400 `outside_root`(`..` 포함), 상대 경로면 `relative_path`, 고정 제외 아래면 `fixed_exclude`. 미리보기는 `{count, examples(경로 소문자순 10개), roots, excludes}`. 저장은 선택 값 `expected_purge`(확인 창의 수)가 실제 삭제 수와 다르면 409 `preview_outdated`(`count` 포함, 웹은 다시 미리보기)이고, 성공하면 설정 응답 + `purged`. 로그: `settings.sync.read`, `settings.sync.previewed`(삭제 수, 루트·패턴 수), `settings.sync.updated`(루트·패턴 수와 추가·제거 수, `purged`, `masked_messages`), `settings.sync.rejected`(이유), `documents.purged`(`reason: scope`). 경로·패턴 원문은 남기지 않습니다.
 - 동기화 상태(`app/api/sync_web.py`, 웹 세션. Agent용 `/sync/*`와 경로가 겹치지 않음): `GET /sync/status`는 `now`, `running`(진행 중 실행), `latest_run`, `last_success_at`(실행 요약: `id`, `source`, `status`, `started_at`, `heartbeat_at`, `finished_at`, `counts`(manifest 판정 건수·업로드 수), `error`), `queue`(`queued`, `running`, `by_type`), `embed`(`used`, `limit`), `last_backup_at`·`last_backup_name`(백업 폴더 `BACKUP_DIR`에서 가장 새 `rag-YYYYMMDD.dump.age`의 수정 시각·파일명, 없으면 null), `held_deletions`(판정을 받은 가장 최근 실행의 `stats.deletion_held.mass_delete`: `run_id`, `count`, `total`, `ratio`, `threshold`, `sample` 10개, `approved_at`), `skipped_formats`(마지막 성공 실행), `stale`(`sync`·`backup`: 없거나 24시간 넘음, 서버 시각 기준). `POST /sync/held-deletions/apply`(`{run_id?}`)는 승인을 기록하고 `{run_id, count, approved_at}`, 보류가 없으면 409 `no_held_deletions`, 화면의 실행과 다르면 409 `held_deletions_outdated`. `POST /sync/run-requests`(202)는 웹의 "지금 동기화" 클릭을 로그로만 남깁니다(`sync.run.requested`). 상태 조회 로그 `sync.status.read`는 2초 간격 조회라 debug 수준입니다.
+- 첫 실행 체크리스트(`app/api/setup.py`): `GET /setup/status`는 `user_exists`, `token_issued`(폐기되지 않은 토큰), `agent_first_seen_at`(`api_tokens.first_used_at`의 최솟값. Bearer 인증이 처음 성공할 때 기록), `first_sync_completed`·`first_sync_at`(`succeeded` 실행), `documents`, `steps`(`key`: `user`·`token`·`agent`·`first_sync`·`documents`, `title`, `command`, `description`, `done`, `done_at`), `completed`, `total`, `complete`. 로그 `setup.status.checked`(완료 단계 수, 남은 단계 키, 문서 수).
+- 상태 점검(`app/api/health.py`): 공개 `GET /health`는 프로세스가 살아 있으면 항상 200과 `{status: "ok", degraded, issues: [{code}]}`만 줍니다(Compose·E2E 준비 확인. 모델 이름·디스크 크기 같은 세부는 주지 않음). 세션이 필요한 `GET /health/details`(웹 전역 배너)는 `status`, `degraded`, `now`, `issues`(`{code, message, since, level}`, 코드 `db_unavailable`·`worker_stale`·`worker_missing`·`disk_low`·`provider_auth`), `checks`를 줍니다. `checks`: `db`(`SELECT 1`), `worker`(가장 최근 하트비트. `WORKER_STALE_SECONDS`(90) 넘으면 `stale`, 행이 없으면 `missing`), `disk`(`DISK_CHECK_PATH`, 기본 업로드 임시 폴더의 디스크. `DISK_MIN_FREE_GB`(10) 미만이면 `low`, 확인하지 못하면 `unknown`), `providers`(`provider_status` 행마다 마지막 성공·실패 시각, 오류 코드, 상태 코드, `failing`=마지막 실패가 마지막 성공보다 나중, `failing_since`). `provider_auth` 이상은 `failing`이고 코드가 `provider_auth`인 종류가 있을 때이며, 키 오류(401·403)와 크레딧·사용량 소진(402, `ProviderQuotaExhausted`)을 함께 다룹니다(402면 문구가 "크레딧·사용량 소진"). `since`는 같은 이상을 구분하는 시각입니다: `provider_auth`는 연속 실패의 첫 시각(실패가 이어져도 그대로라 배너가 실패마다 다시 뜨지 않음), `worker_stale`은 마지막 하트비트, 그 밖은 API 프로세스가 처음 발견한 시각. `level`은 이상이 심해지면 바뀌는 값(`disk_low`: 남은 GB 내림). 로그 `health.degraded`(이상 코드, Worker·디스크 상태, 실패 중인 Provider)는 이상의 내용(코드·`since`·`level`)이 바뀔 때만, 정상으로 돌아오면 `health.recovered`. 발견 시각과 마지막 로그 기록은 프로세스 메모리에 두므로 API를 여러 프로세스로 띄우면 프로세스마다 따로 기록됩니다(운영은 프로세스 하나).
+- Provider 상태 기록(`app/providers/monitor.py`): 채팅(`_default_providers`)과 Worker·`ingest-local`의 Provider를 감싸 호출 결과를 `provider_status`에 남깁니다. 실패는 매번(`provider.failure.recorded` 로그, 같은 코드로 이어진 실패면 `failing_since`를 그대로 둠), 성공은 종류마다 60초에 한 번(직전이 실패였으면 바로, `failing_since`를 비움). 프로세스 시작 시 `configure_recorder(sessionmaker)`로 켜며(API lifespan, CLI), 켜지 않으면 기록하지 않습니다(pytest 기본). 기록 실패는 모델 호출에 영향을 주지 않습니다(`provider.status.record_failed`).
 - 색인 범위(`app/api/index.py`): `by_status`(상태별 문서 수), `total_docs`·`bm25_docs`·`vector_docs`·`pending_docs`(질의의 검색 범위와 같은 기준), `embed_waiting`(`queued`·`extracting`·`indexed`·`embedding` 문서 수), `daily_limit`, `used_today`, `estimated_completion`(오늘 남은 한도를 먼저 쓰고 나머지를 하루 한도로 나눈 날 수를 더한 한국 시간 날짜, 기다리는 파일이 없으면 null). 로그 `index.coverage.read`.
 
 FastAPI의 OpenAPI 스키마에서 `openapi-typescript`로 웹의 타입을 생성합니다. API를 바꾸면 웹 타입도 같이 갱신합니다.
@@ -775,6 +780,7 @@ web/src/
 - **접근성:** 스트리밍 답변 영역은 `aria-live="polite"`, 인용 칩은 버튼 요소로 만들어 키보드로 조작할 수 있게 합니다. 한글 조합 중 Enter는 전송하지 않습니다.
 - **문서 화면 구현(`web/src/features/documents/`):** `DocumentsPage`(탭·검색어·폴더·쪽을 URL 쿼리로. 탭 9개 = 전체 + 9.1의 8개. 실패 사유·해결 안내는 `status.ts`의 3.4 표 문구. 재처리 결과 `needs_upload`면 "다음 동기화 대기"와 "지금 동기화"(동기화 화면으로 이동) 버튼, `rechunk`면 재청킹 안내. 영구 삭제 확인 창은 `alertdialog`로 6.5 확인 문구 표시), `DocumentDetailPage`(섹션별 추출 텍스트. `?loc=`의 위치에 드는 섹션을 강조하고 첫 섹션으로 스크롤. 청크 위치는 섹션 위치를 합친 것이라 `<키>_end` 범위·`lines` 겹침으로 판정. "이 문서 요약"은 `/`로 `state.summarize`를 넘겨 채팅이 `summarize_document_id`로 한 번 보냄. 문서가 404거나 저장된 인용의 수정 시각이 문서와 다르면·인용이 가려졌으면 "원문이 바뀌었거나 삭제되었습니다"와 저장된 인용 구절 표시). 채팅 디렉터리 필터는 `/documents/suggest` 결과를 `datalist`로 자동완성합니다.
 - **동기화 화면 구현(`web/src/features/sync/SyncPage.tsx`, `src/api/sync.ts`):** 상태 카드(최근 실행·대기열·오늘 임베딩 x/한도·최근 백업·건너뛴 형식), 제목 옆 경고 배지(`stale`), 보류된 삭제 판정 경고(예시 경로, "삭제 판정 적용" → 확인 창 → 승인 후 "다음 동기화 때 적용" 표시), 수집 범위 편집(루트·편집 가능한 제외 패턴 목록, 고정 제외는 "고정 · 편집 불가"로 삭제 버튼 없이 표시하고 같은 패턴 추가를 막음. "저장"은 먼저 미리보기를 불러 확인 창에 삭제 수·예시·6.5 확인 문구를 보이고, 확인하면 그 수를 `expected_purge`로 저장). "지금 동기화"는 9.3 흐름: 누른 시점의 최근 실행 ID보다 큰 실행이 생기면 "새 실행"으로 봅니다(브라우저 시계와 서버 시계를 비교하지 않음). Windows 판정은 `userAgentData.platform`(없으면 `userAgent`)에 `Win`이 있는지입니다.
+- **공통 화면 상태 구현:** 시각 표시는 `src/lib/time.ts`(`formatRelative`·`formatRelativeDateTime`·`formatDate`·`formatDateTime`, 한국 시간, 하루 이내 상대 시각)를 모든 화면이 함께 씁니다. 전역 배너 `src/components/GlobalBanner.tsx`는 `AppLayout` 머리글 아래에서 `/health/details`를 30초마다(채팅 답변이 끝날 때도) 읽어 `issues`를 `role="alert"`로 보여줍니다. 닫은 배너는 `sessionStorage`에 `code|since|level`(`src/lib/banner.ts`)로 기억하고, 이상이 사라졌다가 다시 생기거나 `since`·`level`이 바뀌면 다시 보여줍니다. 체크리스트 상태를 읽는 동안은 "불러오는 중", 읽지 못하면 기존 질문 안내와 확인 실패 문구를 보여줍니다. 시각·배너 키는 `web/tests/*.test.ts`(`corepack pnpm test`, Node 내장 테스트 러너)로 단위 테스트합니다. 첫 실행 체크리스트 `src/features/setup/SetupChecklist.tsx`는 `/setup/status`의 `documents`가 0이고 메시지가 없을 때 채팅 화면의 빈 안내 대신 단계별 명령과 완료 표시(완료 시각)를 보여줍니다.
 - **채팅 화면 구현(`web/src/features/chat/`):** `ChatPage`(배치, 대화 불러오기, 768px 미만 서랍), `ConversationList`(이름 변경·삭제 확인), `AnswerMarkdown`(마크다운, 인용 칩. `[n]`은 remark 플러그인이 mdast의 text 노드에서만 바꾸므로 `code`·`inlineCode` 안은 그대로), `SourcePanel`(출처 항목, 문서 상세 링크 `/documents/{id}?loc=<위치 JSON>`, 저장된 인용을 화면 상태로 함께 넘김), `FeedbackBar`, `ChatFilters`. 다시 시도는 실패한 질문·답변 말풍선을 지우고 같은 질문·필터를 같은 대화로 다시 보냅니다(실패한 메시지는 DB에 `error`로 남음). "폴더에서 보기"의 `k`는 브라우저가 `crypto.subtle`로 계산합니다(path\_key 식은 10.2와 같음).
 
 ### 9.3 "지금 동기화" 버튼
@@ -897,6 +903,9 @@ web/src/
 | `LOCAL_DELETED_RETENTION_DAYS` | `30` | 로컬 삭제 문서 보관 기간(6.5) |
 | `MASS_DELETE_GUARD_RATIO` | `0.2` | 한 번에 이 비율을 넘는 삭제 판정은 보류(6.1) |
 | `SYNC_RUN_STALE_MINUTES` | `10` | 하트비트가 끊긴 동기화 실행을 `abandoned`로 바꾸는 시간 |
+| `WORKER_STALE_SECONDS` | `90` | `/health`가 Worker 하트비트 끊김으로 보는 시간(초) |
+| `DISK_CHECK_PATH` | (비움 = 업로드 임시 폴더) | `/health`가 여유 공간을 확인할 경로 |
+| `DISK_MIN_FREE_GB` | `10` | 디스크 여유가 이보다 작으면 `/health` 경고 |
 | `LOG_QUERY_TEXT` | `false` | 앱 로그에 질문 원문 기록 여부(개발·E2E 전용) |
 | `CHAT_TIMEOUT_SECONDS` | `60` | 질의 하나의 전체 시간 상한(7.3 `timeout`) |
 | `FAKE_LLM_TOKEN_DELAY_MS` | `0` | `PROVIDER=fake` 전용. Fake LLM 조각 사이 지연. E2E는 150으로 두어 단계 표시를 화면에서 확인 |
@@ -930,7 +939,7 @@ web/src/
 
 ### 12.4 모니터링
 
-- `/health`가 DB 연결, Worker 하트비트(30초마다 DB에 기록), 디스크 여유(10GB 미만이면 경고), NVIDIA API 마지막 성공·실패 시각과 오류 코드를 반환합니다. API 키 오류나 크레딧 소진은 웹 전체 배너로 보여줍니다.
+- `/health`(공개 요약)와 `/health/details`(세션)가 DB 연결, Worker 하트비트(30초마다 DB에 기록, 90초 넘으면 이상), 디스크 여유(10GB 미만이면 경고), NVIDIA API 마지막 성공·실패 시각과 오류 코드를 반환합니다. API 키 오류(401·403)나 크레딧 소진(402)은 웹 전체 배너로 보여줍니다.
 - 동기화 화면에 마지막 성공 동기화 시각과 마지막 백업 시각을 표시합니다. 하루 넘게 갱신되지 않으면 경고 배지를 띄웁니다.
 - 별도 모니터링 시스템은 두지 않습니다.
 

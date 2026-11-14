@@ -58,6 +58,7 @@ from app.providers.factory import (
     create_llm_provider,
     create_rerank_provider,
 )
+from app.providers.monitor import monitored_embedder, monitored_llm, monitored_reranker
 from app.query.graph import QueryDeps, QueryResult, QueryTrace, run_query, save_query_log
 from app.query.postprocess import cited_numbers
 from app.query.search import SearchFilters
@@ -147,10 +148,11 @@ class ChatProviders:
 
 @lru_cache
 def _default_providers() -> ChatProviders:
+    # 호출 결과를 provider_status에 남긴다(`/health`, 전역 배너. TRD 12.4)
     return ChatProviders(
-        llm=create_llm_provider(),
-        embedder=create_embedding_provider(),
-        reranker=create_rerank_provider(),
+        llm=monitored_llm(create_llm_provider()),
+        embedder=monitored_embedder(create_embedding_provider()),
+        reranker=monitored_reranker(create_rerank_provider()),
     )
 
 
