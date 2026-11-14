@@ -197,6 +197,14 @@ test.describe("채팅 (F-08 질의 그래프와 SSE)", () => {
 
   test("인용 칩을 누르면 출처 패널의 해당 항목이 열린다", async ({ page, context }) => {
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    // "폴더에서 보기"는 Windows 브라우저에서만 보인다. E2E를 Linux(WSL)에서 돌려도 운영 사용자(Windows)의
+    // 화면을 확인하도록 브라우저 플랫폼을 Windows로 둔다.
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "userAgentData", {
+        configurable: true,
+        get: () => ({ platform: "Windows" }),
+      });
+    });
     const question = `${CODE} 프로젝트 마감일 알려줘 (인용 칩)`;
     const since = backendLogMark();
 

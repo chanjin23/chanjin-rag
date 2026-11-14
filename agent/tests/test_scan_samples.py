@@ -21,7 +21,7 @@ DEFAULT_EXCLUDES = [".git/", "node_modules/", ".venv/", "venv/", "__pycache__/",
 
 def _sample_dirs() -> list[Path]:
     raw = os.environ.get("SAMPLE_DOCS_DIRS", "")
-    return [Path(p) for p in raw.split(";") if p.strip() and Path(p).is_dir()]
+    return [Path(p) for p in raw.split(os.pathsep) if p.strip() and Path(p).is_dir()]
 
 
 def test_scan_sample_folders_and_reuse_hash_cache(tmp_path: Path) -> None:

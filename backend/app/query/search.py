@@ -84,13 +84,16 @@ def directory_prefix(directory: str | None) -> str | None:
 
     끝에 구분자를 붙여 `C:\\a`가 `C:\\ab\\x.md`에 걸리지 않게 한다. `LIKE`는 `\\`를 이스케이프
     문자로 해석해 Windows 경로에서 틀리므로 SQL에서는 `starts_with`로 비교한다.
+    `/`로 시작하는 POSIX 경로(Linux에서 `ingest-local`로 넣은 문서)는 `/` 구분을 유지한다.
     """
     if directory is None:
         return None
-    key = make_path_key(directory.strip()).replace("/", "\\").rstrip("\\")
+    raw = make_path_key(directory.strip())
+    sep = "/" if raw.startswith("/") else "\\"
+    key = raw.replace("\\" if sep == "/" else "/", sep).rstrip(sep)
     if not key:
         return None
-    return key + "\\"
+    return key + sep
 
 
 def normalize_exts(exts: Sequence[str] | None) -> list[str]:

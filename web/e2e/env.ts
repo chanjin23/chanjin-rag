@@ -26,3 +26,19 @@ export const TEST_DATABASE_URL =
 
 /** 업로드 원본 임시 폴더(E2E 백엔드와 `rag-backend ingest-local`이 함께 씀). */
 export const UPLOAD_TMP_DIR = path.resolve(import.meta.dirname, ".tmp", "uploads");
+
+const IS_WINDOWS = process.platform === "win32";
+
+/**
+ * E2E 백엔드의 수집 허용 폴더(SYNC_ALLOWED_ROOT). Windows는 운영과 같은 `C:\Chanjin\dev`,
+ * 그 밖(WSL 등 Linux)은 E2E 임시 폴더를 쓴다. Agent E2E는 이 아래에 실제 파일을 만들어 스캔하므로
+ * 실행하는 OS에 실제로 있는 경로여야 한다. Sync API는 경로를 문자열로만 검사한다.
+ */
+export const SYNC_ROOT = IS_WINDOWS
+  ? "C:\\Chanjin\\dev"
+  : path.resolve(import.meta.dirname, ".tmp", "sync-root");
+
+/** 허용 폴더 아래 경로(OS 구분자 사용). 예: `syncPath("project", "app", "README.md")` */
+export function syncPath(...parts: string[]): string {
+  return [SYNC_ROOT, ...parts].join(IS_WINDOWS ? "\\" : "/");
+}

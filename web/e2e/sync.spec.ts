@@ -4,13 +4,13 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { type APIRequestContext, expect, test } from "@playwright/test";
 import { backendLogMark, findBackendLogs, waitForBackendLog } from "./backendLog";
-import { API_URL, BACKEND_LOG, TEST_DATABASE_URL, UPLOAD_TMP_DIR } from "./env";
+import { API_URL, BACKEND_LOG, syncPath, TEST_DATABASE_URL, UPLOAD_TMP_DIR } from "./env";
 
 /**
  * T07 Sync API(Agent 전용, Bearer 토큰): 실행 기록 → manifest 판정 → 업로드·메타 등록 → 완료.
  * Agent(T08)와 동기화 화면(T13)은 아직 없어서, Agent가 보낼 요청을 테스트가 직접 보내고
- * 응답과 백엔드 로그로 확인한다. 경로는 운영과 같은 Windows 경로 문자열(허용 폴더 C:\Chanjin\dev)이고,
- * 서버는 경로를 문자열로만 검사한다. 파일 내용은 모두 테스트가 만든 합성 텍스트.
+ * 응답과 백엔드 로그로 확인한다. 경로는 E2E 허용 폴더(env.ts `SYNC_ROOT`, Windows는 운영과 같은 C:\Chanjin\dev)
+ * 아래 문자열이고, 서버는 경로를 문자열로만 검사한다. 파일 내용은 모두 테스트가 만든 합성 텍스트.
  *
  * 테스트 DB는 E2E 실행 사이에 남으므로, 실행마다 새 폴더 이름(stamp)을 쓴다. manifest에는 이번
  * 테스트의 파일만 넣으므로 이전 문서는 "사라진 문서"가 되어 대량 삭제 보호에 걸린다(삭제되지 않음).
@@ -104,9 +104,9 @@ const entry = (filePath: string, sha: string, size = 100) => ({ path: filePath, 
 test("Sync API: manifest 판정에 따라 업로드·메타 등록을 받고 실행 완료를 기록한다", async ({ request }) => {
   test.setTimeout(120_000);
   const stamp = `${Date.now()}`;
-  const folder = `C:\\Chanjin\\dev\\e2e-sync-${stamp}`;
-  const memo = `${folder}\\회의록.md`;
-  const big = `${folder}\\설계도면.pdf`;
+  const folder = syncPath(`e2e-sync-${stamp}`);
+  const memo = syncPath(`e2e-sync-${stamp}`, "회의록.md");
+  const big = syncPath(`e2e-sync-${stamp}`, "설계도면.pdf");
   const memoText = `# 동기화 ${stamp}\n\n다음 배포는 금요일에 한다.\n`;
   const bigSha = sha256(`big-${stamp}`);
 
@@ -131,11 +131,11 @@ test("Sync API: manifest 판정에 따라 업로드·메타 등록을 받고 실
   const judged = await agent.manifest(runId, [
     entry(memo, sha256(memoText), Buffer.byteLength(memoText)),
     entry(big, bigSha, 11 * 1024 * 1024),
-    entry("C:\\Chanjin\\dev\\project\\app\\README.md", sha256("x")),
+    entry(syncPath("project", "app", "README.md"), sha256("x")),
   ]);
   expect(judged.upload).toEqual([memo]);
   expect(judged.meta_only).toEqual([big]);
-  expect(judged.rejected).toEqual([{ path: "C:\\Chanjin\\dev\\project\\app\\README.md", reason: "fixed_exclude" }]);
+  expect(judged.rejected).toEqual([{ path: syncPath("project", "app", "README.md"), reason: "fixed_exclude" }]);
   const judgedLog = await waitForBackendLog((r) => r.event === "sync.manifest.judged" && r.run_id === runId, { since });
   expect(judgedLog).toMatchObject({ files: 3, upload: 1, meta_only: 1, rejected: 1 });
 
@@ -145,7 +145,7 @@ test("Sync API: manifest 판정에 따라 업로드·메타 등록을 받고 실
   expect((await mismatch.json()).error.code).toBe("hash_mismatch");
 
   // 고정 제외 경로는 서버가 다시 검증해 거부
-  const excluded = await agent.upload("C:\\Chanjin\\dev\\backup\\rag.md", memoText);
+  const excluded = await agent.upload(syncPath("backup", "rag.md"), memoText);
   expect(excluded.status()).toBe(400);
   expect((await excluded.json()).error.code).toBe("fixed_exclude");
 
@@ -192,10 +192,10 @@ test("Sync API: manifest 판정에 따라 업로드·메타 등록을 받고 실
 test("Sync API: 이동은 경로만 바꾸고, 한 번에 많이 사라지면 삭제 판정을 보류한다", async ({ request }) => {
   test.setTimeout(120_000);
   const stamp = `${Date.now()}`;
-  const folder = `C:\\Chanjin\\dev\\e2e-sync-${stamp}`;
-  const before = `${folder}\\메모.md`;
-  const after = `${folder}\\보관\\메모-이동.md`;
-  const big = `${folder}\\큰자료.pdf`;
+  const folder = syncPath(`e2e-sync-${stamp}`);
+  const before = syncPath(`e2e-sync-${stamp}`, "메모.md");
+  const after = syncPath(`e2e-sync-${stamp}`, "보관", "메모-이동.md");
+  const big = syncPath(`e2e-sync-${stamp}`, "큰자료.pdf");
   const text = `# 이동 ${stamp}\n\n이 파일은 폴더를 옮긴다.\n`;
   const bigSha = sha256(`big-${stamp}`);
   const agent = new Agent(request, issueToken());

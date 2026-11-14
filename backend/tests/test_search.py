@@ -242,6 +242,9 @@ async def test_directory_ext_mtime_filters(session: AsyncSession) -> None:
     assert await doc_names(SearchFilters(directory=r"C:\없는폴더")) == set()
     assert directory_prefix(r"C:\Docs\A\\") == "c:\\docs\\a\\"
     assert directory_prefix("  ") is None
+    # POSIX 경로(Linux에서 ingest-local로 넣은 문서)는 `/` 구분을 유지한다
+    assert directory_prefix("/Home/Notes/Sub/") == "/home/notes/sub/"
+    assert directory_prefix("/") is None
 
     # 형식: 소문자, 점 무시
     assert await doc_names(SearchFilters(exts=[".PDF"])) == {"a_pdf"}

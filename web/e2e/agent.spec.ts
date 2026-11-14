@@ -3,15 +3,15 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import path from "node:path";
 import { expect, test } from "@playwright/test";
 import { backendLogMark, findBackendLogs, waitForBackendLog } from "./backendLog";
-import { API_URL, BACKEND_LOG, TEST_DATABASE_URL, UPLOAD_TMP_DIR } from "./env";
+import { API_URL, BACKEND_LOG, syncPath, TEST_DATABASE_URL, UPLOAD_TMP_DIR } from "./env";
 
 /**
  * T08 Windows Sync Agent: 실제 `rag-agent` CLI를 E2E 백엔드(:8001)에 실행한다.
  * 동기화 화면(T13)은 아직 없어서 화면 대신 CLI 출력, Agent 로그(agent.log), 백엔드 로그로 확인한다.
  *
- * - 서버 경로 검사(허용 폴더 C:\Chanjin\dev) 때문에 실제 파일을 `C:\Chanjin\dev\e2e-agent-<stamp>`에
- *   합성 텍스트로 만들고 끝나면 지운다.
- * - `RAG_AGENT_SCAN_ROOTS`로 서버 루트(C:\Chanjin\dev)를 이 폴더로 좁힌다. Agent는 스캔하지 않은 서버
+ * - 서버 경로 검사(허용 폴더 env.ts `SYNC_ROOT`, Windows는 C:\Chanjin\dev) 때문에 실제 파일을
+ *   `<SYNC_ROOT>/e2e-agent-<stamp>`에 합성 텍스트로 만들고 끝나면 지운다.
+ * - `RAG_AGENT_SCAN_ROOTS`로 서버 루트(SYNC_ROOT)를 이 폴더로 좁힌다. Agent는 스캔하지 않은 서버
  *   루트를 `scan_errors`로 보내므로 다른 문서는 삭제로 판정되지 않는다(실제 문서 폴더는 읽지 않음).
  * - 상태 폴더(`RAG_AGENT_HOME`)는 e2e/.tmp 아래 새 폴더라 실제 Agent의 state.db·뮤텍스와 겹치지 않는다.
  * - `reveal`의 성공 경로는 탐색기 창을 띄우므로 pytest(가짜 실행기)에서만 확인하고, 여기서는 거절만 본다.
@@ -68,7 +68,7 @@ function readAgentLog(home: string): AgentLog[] {
 test("Sync Agent: rag-agent sync가 폴더를 스캔해 판정대로 업로드하고, chanjin-sync 링크는 로컬 설정으로만 동작한다", async () => {
   test.setTimeout(180_000);
   const stamp = `${Date.now()}`;
-  const folder = `C:\\Chanjin\\dev\\e2e-agent-${stamp}`;
+  const folder = syncPath(`e2e-agent-${stamp}`);
   const home = path.resolve(import.meta.dirname, ".tmp", `agent-home-${stamp}`);
   const token = issueToken();
   const env = {
