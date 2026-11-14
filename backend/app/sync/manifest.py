@@ -25,6 +25,10 @@ Agent가 보낸 전체 목록(`path`, `size`, `mtime`, `sha256`)과
   제외에 걸리지 않음)인 문서다. 범위에서 빠진 문서는 설정을 저장할 때 영구 삭제한다(TRD 6.5).
 - 대량 삭제 보호: 새 삭제 판정 수가 범위 안 활성 문서 수의 `MASS_DELETE_GUARD_RATIO`(20%)를 넘으면
   삭제 판정을 모두 보류하고 실행의 `stats.deletion_held`에 기록한다.
+- 보류 승인: 사용자가 동기화 화면에서 "삭제 판정 적용"을 눌렀으면
+  (`sync_config.held_deletions_approved_at`) 이번 판정은 보호를 건너뛰고 삭제를 적용한다.
+  승인은 한 번만 쓰고 판정 결과와 상관없이 비운다
+  (`stats.manifest.held_deletions_approved`, 로그 `sync.deletion.approval_used`).
 - 범위 밖·고정 제외·지원하지 않는 확장자 항목은 판정하지 않고 `rejected`로 돌려준다(Agent 규칙의
   서버 측 검증).
 - `upload`·`meta_only` 판정은 문서를 만들지 않는다. 업로드(`PUT /sync/files`)나 메타 등록
@@ -42,7 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.db.keys import make_path_key
-from app.db.models import Document, SyncRun
+from app.db.models import Document, SyncConfig, SyncRun
 from app.ingest.intake import FileMeta
 from app.ingest.scope import under_any
 from app.sync.documents import copy_document, copyable, relocate
@@ -186,10 +190,22 @@ async def judge_manifest(
     to_delete = [d for d in missing if not under_any(d.path, scan_errors)]
     result.scan_error_held = [d.path for d in held_by_scan]
 
+    config = await session.get(SyncConfig, 1, with_for_update=True)
+    approved = config is not None and config.held_deletions_approved_at is not None
+    if config is not None and approved:
+        log.info(
+            "sync.deletion.approval_used",
+            run_id=run.id,
+            approved_run_id=config.held_deletions_run_id,
+            count=len(to_delete),
+        )
+        config.held_deletions_approved_at = None
+        config.held_deletions_run_id = None
+
     held: dict[str, Any] = {}
     total = len(active_in_scope)
     ratio = len(to_delete) / total if total else 0.0
-    if to_delete and ratio > guard_ratio:
+    if to_delete and ratio > guard_ratio and not approved:
         result.deletion_held = [d.path for d in to_delete]
         held["mass_delete"] = {
             "count": len(to_delete),
@@ -235,6 +251,7 @@ async def judge_manifest(
             "scan_errors": len(scan_errors),
             **counts,
             "rejected_reasons": dict(rejected_reasons),
+            "held_deletions_approved": approved,
         },
         "deletion_held": held,
     }

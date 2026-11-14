@@ -223,7 +223,7 @@ chanjin-rag/
 
 | 테이블 | 핵심 컬럼 | 설명 |
 | --- | --- | --- |
-| `sync_config` | `roots jsonb`, `excludes jsonb`, `max_file_mb int`(기본 10), `updated_at` | 단일 행. Agent가 실행할 때마다 받아 감. 고정 제외는 여기에 넣지 않고 코드에 둠. `max_file_mb`는 웹에서 바꾸지 않음(Nginx 업로드 상한과 함께 바꿔야 하므로) |
+| `sync_config` | `roots jsonb`, `excludes jsonb`, `max_file_mb int`(기본 10), `held_deletions_approved_at`, `held_deletions_run_id`(보류 삭제 적용 승인, 6.1), `updated_at` | 단일 행. Agent가 실행할 때마다 받아 감. 고정 제외는 여기에 넣지 않고 코드에 둠. `max_file_mb`는 웹에서 바꾸지 않음(Nginx 업로드 상한과 함께 바꿔야 하므로) |
 | `documents` | `id`, `path`, `path_key`(NFC 정규화 후 소문자, unique), `filename`, `ext`(소문자, 점 포함: `.md`), `size`, `mtime`, `sha256`, `status`, `failure_code`, `failure_detail`, `content_indexed bool`, `locally_deleted bool`, `deleted_at`, `needs_upload bool`, `embed_charged_sha256`, `embed_model`, `embed_dim`, `created_at`, `updated_at` | 파일 1개 = 1행. `path`는 원래 Windows 경로를 그대로 보관. `embed_charged_sha256`은 한도를 이미 차감한 버전 |
 | `sections` | `id`, `document_id`, `seq`, `location jsonb`, `heading_path text[]`, `kind`, `text` | 추출 텍스트 원본. 재청킹은 여기서 다시 하므로 재업로드가 필요 없음 |
 | `chunks` | `id`, `document_id`, `seq`, `location jsonb`, `heading_path`, `filename`, `content`, `content_sha256`, `bm25_text`, `token_count`, `embedding halfvec(N)`(NULL 허용, N=`EMBED_DIM`), `embed_model` | 검색 단위. `bm25_text`는 Kiwi 토큰을 공백으로 이은 문자열. `content_sha256`은 임베딩 입력(머리말 포함)의 해시로, 임베딩 재사용에 씀. `filename`은 `documents.filename`의 사본으로, BM25 색인이 한 테이블의 컬럼만 색인할 수 있어 둠(파일 이동 시 함께 갱신) |
@@ -339,6 +339,7 @@ sequenceDiagram
 
 - manifest에는 파일 목록과 함께 `scan_errors`(권한 오류 등으로 읽지 못한 폴더 목록)를 보냅니다.
 - **대량 삭제 보호:** 이번 실행에서 새로 삭제로 판정된 문서가 전체 문서의 20%(`MASS_DELETE_GUARD_RATIO`)를 넘으면 삭제 판정을 모두 보류하고, `sync_runs.stats`에 기록해 동기화 화면에 경고를 띄웁니다. 사용자가 화면에서 "삭제 판정 적용"을 누르면 다음 실행 때 적용합니다.
+  - 구현: 승인하면 `sync_config.held_deletions_approved_at`·`held_deletions_run_id`를 기록합니다(보류된 경로 전체 목록은 저장하지 않으므로 그 실행의 판정을 그대로 되살리지 않음). 다음 manifest 판정은 보호를 건너뛰고 그때 사라진 문서를 로컬 삭제로 표시하며, 승인은 판정 결과와 상관없이 한 번 쓰고 비웁니다(`stats.manifest.held_deletions_approved`, 로그 `sync.deletion.approval_used`).
 - 업로드 시 서버가 다시 계산한 해시가 manifest와 다르면(업로드 사이에 파일이 바뀜) 저장하지 않고 `hash_mismatch`로 응답합니다. Agent는 다음 실행에서 자연스럽게 다시 올립니다.
 
 **판정 세부 규칙(구현: `backend/app/sync/manifest.py`)**
@@ -453,7 +454,7 @@ Worker는 하나의 프로세스에서 작업 루프와 APScheduler를 함께 �
 
 | 원인 | 시점 | 처리 |
 | --- | --- | --- |
-| 루트 해제, 제외 패턴 추가 | `PUT /settings/sync` 저장 시 | 새 설정에 맞지 않는 문서를 즉시 영구 삭제. 저장 전에 `POST /settings/sync/preview`로 삭제될 문서 수와 예시 경로를 보여주고 확인받음 |
+| 루트 해제, 제외 패턴 추가 | `PUT /settings/sync` 저장 시 | 지금 설정으로 범위 안이던 문서 중 새 설정에 맞지 않는 문서를 즉시 영구 삭제(이미 범위 밖이던 문서는 대상 아님). 저장 전에 `POST /settings/sync/preview`로 삭제될 문서 수와 예시 경로를 보여주고 확인받음 |
 | 로컬 삭제 | `deleted_at`부터 30일(`LOCAL_DELETED_RETENTION_DAYS`) | Worker의 APScheduler가 매일 04:00에 기간이 지난 문서를 영구 삭제 |
 | 사용자 요청 | 문서 화면에서 "영구 삭제" | `DELETE /documents/{id}`로 즉시 삭제 |
 
@@ -702,6 +703,7 @@ NVIDIA API 실측값(13장)이 예산을 넘으면 rewrite 생략 조건을 넓�
 | POST | `/settings/sync/preview` | 바꿀 설정 → 범위에서 빠질 문서 수와 예시 경로 10개(저장하지 않음) | F-01, F-19 |
 | GET | `/sync/status` | 최근 실행, 대기열 수, 오늘 임베딩 사용량(x/100), 최근 백업 시각, 보류된 삭제 판정, 건너뛴 형식 통계 | F-03, F-05 |
 | POST | `/sync/held-deletions/apply` | 대량 삭제 보호로 보류된 판정을 다음 실행에서 적용 | F-02 |
+| POST | `/sync/run-requests` | "지금 동기화" 클릭 기록(로그만, 실행은 Agent) | F-03 |
 | GET | `/index/coverage` | 상태별 문서 수, 의미 검색 가능 수, 완료 예상일(대기 파일 수 ÷ 하루 한도) | F-18 |
 | GET | `/setup/status` | 첫 실행 체크리스트: 토큰 발급 여부, Agent 첫 접속 시각, 첫 동기화 완료 여부 | F-18 |
 | GET | `/documents` | 목록(상태, 형식, 경로, 검색어, 로컬 삭제 여부 필터, 페이지네이션) | F-05 |
@@ -720,6 +722,8 @@ NVIDIA API 실측값(13장)이 예산을 넘으면 rewrite 생략 조건을 넓�
 - 대화(`app/api/conversations.py`): 목록은 `updated_at` 내림차순 `[{id, title, created_at, updated_at}]`. `POST /conversations`(`title`?)는 제목을 주지 않으면 빈 제목으로 만들고 첫 질문 앞 40자로 채웁니다(웹은 빈 제목을 "새 대화"로 표시). `GET /conversations/{id}`는 메시지마다 `id`, `role`, `content`, `status`, `citations`, `created_at`, `not_found`·`coverage`(질의 로그에서), `feedback`(`rating`, `reason`, `note`)을 줍니다. `PATCH`는 `title`(공백 정리 후 1\~200자, 빈 값 422). `DELETE`는 204이며 메시지·질의 로그·피드백을 외래 키 `ON DELETE CASCADE`로 함께 지웁니다. 숫자가 아니거나 없는 대화는 404 `conversation_not_found`. 로그: `conversation.created`(`source`: `message`·`api`), `conversation.renamed`(제목 글자 수), `conversation.deleted`(지운 메시지·질의 로그·피드백 수). 제목 원문은 로그에 남기지 않습니다.
 - 피드백(`app/api/feedback.py`): 본문 `{rating: 1 | -1, reason?, note?(2,000자 이하, 빈 문자열은 NULL)}`. `message_id` 기준 `INSERT … ON CONFLICT DO UPDATE`로 덮어쓰며 `failure_type`·`reviewed_at`은 그대로 둡니다. 답변이 아닌 메시지·없는 메시지는 404 `message_not_found`. 로그 `feedback.saved`(메시지 ID, 평가, 사유, 메모 유무. 메모 원문은 남기지 않음).
 - 문서(`app/api/documents.py`): `GET /documents`는 `status`(여러 번 가능), `ext`(점 없이도 됨), `path`(폴더 앞부분, 폴더 경계로 자르고 대소문자 무시), `q`(경로·파일명 부분 일치, 대소문자 무시), `locally_deleted`, `page`(1부터), `page_size`(기본 50, 최대 200)를 받고 수정 시각 최신순 `{items, total, page, page_size, counts}`를 줍니다. `counts`는 필터와 무관한 상태별 개수와 `locally_deleted` 개수(화면 탭 숫자). 항목: `id`, `path`, `filename`, `ext`, `size`, `mtime`, `status`, `failure_code`, `failure_detail`, `locally_deleted`, `deleted_at`, `needs_upload`, `chunks`(청크 수), `updated_at`. `GET /documents/{id}`는 여기에 `sections`(`seq`, `location`, `heading_path`, `kind`, `text`)를 더합니다. `POST /documents/{id}/reprocess`: `failed`·`no_text`(또는 섹션이 없는 `ready`·`indexed`)는 `needs_upload=true`만 표시(상태·사유는 그대로, 다시 올라오면 새로 판정) → `action: needs_upload`. `ready`·`indexed`는 기다리는 `index`·`embed` 작업을 `done`으로 정리하고 상태를 `extracting`(처리 중)으로 바꾼 뒤 `index` 작업을 등록 → Worker가 sections에서 재청킹(같은 임베딩 입력이면 벡터 재사용, 같은 버전이라 한도도 다시 차감하지 않음) → `action: rechunk`. 그 밖의 상태(대기·처리 중·파일명만)는 409 `not_reprocessable`. `DELETE`는 204(6.5 구현). `GET /documents/suggest?prefix=`는 앞부분 바로 다음 단계까지의 폴더 경로(원래 표기, 최대 20개). 숫자가 아니거나 없는 문서는 404 `document_not_found`. 로그: `documents.listed`(쓴 필터 이름과 개수, 검색어 원문 없음), `documents.read`, `documents.suggested`, `documents.reprocess.requested`(문서 ID, 이전 상태, 방식, 실패 코드), `documents.purged`.
+- 동기화 범위 설정(`app/api/settings.py`, `app/sync/settings.py`): `GET`은 `allowed_root`, `roots`, `excludes`(`[{pattern, fixed}]`, 고정 제외가 `fixed: true`로 앞에), `max_file_mb`, `updated_at`. 미리보기·저장 본문은 `{roots, excludes}`(편집 가능한 패턴만. 고정 제외는 대소문자·구분자를 무시하고 걸러 저장하지 않음). 루트는 공백·끝 구분자를 정리하고 `path_key`가 같은 것은 하나만 남기며, 허용 폴더 하위가 아니면 400 `outside_root`(`..` 포함), 상대 경로면 `relative_path`, 고정 제외 아래면 `fixed_exclude`. 미리보기는 `{count, examples(경로 소문자순 10개), roots, excludes}`. 저장은 선택 값 `expected_purge`(확인 창의 수)가 실제 삭제 수와 다르면 409 `preview_outdated`(`count` 포함, 웹은 다시 미리보기)이고, 성공하면 설정 응답 + `purged`. 로그: `settings.sync.read`, `settings.sync.previewed`(삭제 수, 루트·패턴 수), `settings.sync.updated`(루트·패턴 수와 추가·제거 수, `purged`, `masked_messages`), `settings.sync.rejected`(이유), `documents.purged`(`reason: scope`). 경로·패턴 원문은 남기지 않습니다.
+- 동기화 상태(`app/api/sync_web.py`, 웹 세션. Agent용 `/sync/*`와 경로가 겹치지 않음): `GET /sync/status`는 `now`, `running`(진행 중 실행), `latest_run`, `last_success_at`(실행 요약: `id`, `source`, `status`, `started_at`, `heartbeat_at`, `finished_at`, `counts`(manifest 판정 건수·업로드 수), `error`), `queue`(`queued`, `running`, `by_type`), `embed`(`used`, `limit`), `last_backup_at`(백업 기록은 T14부터, 그 전에는 null), `held_deletions`(판정을 받은 가장 최근 실행의 `stats.deletion_held.mass_delete`: `run_id`, `count`, `total`, `ratio`, `threshold`, `sample` 10개, `approved_at`), `skipped_formats`(마지막 성공 실행), `stale`(`sync`·`backup`: 없거나 24시간 넘음, 서버 시각 기준). `POST /sync/held-deletions/apply`(`{run_id?}`)는 승인을 기록하고 `{run_id, count, approved_at}`, 보류가 없으면 409 `no_held_deletions`, 화면의 실행과 다르면 409 `held_deletions_outdated`. `POST /sync/run-requests`(202)는 웹의 "지금 동기화" 클릭을 로그로만 남깁니다(`sync.run.requested`). 상태 조회 로그 `sync.status.read`는 2초 간격 조회라 debug 수준입니다.
 - 색인 범위(`app/api/index.py`): `by_status`(상태별 문서 수), `total_docs`·`bm25_docs`·`vector_docs`·`pending_docs`(질의의 검색 범위와 같은 기준), `embed_waiting`(`queued`·`extracting`·`indexed`·`embedding` 문서 수), `daily_limit`, `used_today`, `estimated_completion`(오늘 남은 한도를 먼저 쓰고 나머지를 하루 한도로 나눈 날 수를 더한 한국 시간 날짜, 기다리는 파일이 없으면 null). 로그 `index.coverage.read`.
 
 FastAPI의 OpenAPI 스키마에서 `openapi-typescript`로 웹의 타입을 생성합니다. API를 바꾸면 웹 타입도 같이 갱신합니다.
@@ -764,6 +768,7 @@ web/src/
 - **입력 보존:** 보내지 못한 질문(401, 네트워크 오류)은 대화별로 `sessionStorage`에 남겨 다시 열면 채웁니다.
 - **접근성:** 스트리밍 답변 영역은 `aria-live="polite"`, 인용 칩은 버튼 요소로 만들어 키보드로 조작할 수 있게 합니다. 한글 조합 중 Enter는 전송하지 않습니다.
 - **문서 화면 구현(`web/src/features/documents/`):** `DocumentsPage`(탭·검색어·폴더·쪽을 URL 쿼리로. 탭 9개 = 전체 + 9.1의 8개. 실패 사유·해결 안내는 `status.ts`의 3.4 표 문구. 재처리 결과 `needs_upload`면 "다음 동기화 대기"와 "지금 동기화"(동기화 화면으로 이동) 버튼, `rechunk`면 재청킹 안내. 영구 삭제 확인 창은 `alertdialog`로 6.5 확인 문구 표시), `DocumentDetailPage`(섹션별 추출 텍스트. `?loc=`의 위치에 드는 섹션을 강조하고 첫 섹션으로 스크롤. 청크 위치는 섹션 위치를 합친 것이라 `<키>_end` 범위·`lines` 겹침으로 판정. "이 문서 요약"은 `/`로 `state.summarize`를 넘겨 채팅이 `summarize_document_id`로 한 번 보냄. 문서가 404거나 저장된 인용의 수정 시각이 문서와 다르면·인용이 가려졌으면 "원문이 바뀌었거나 삭제되었습니다"와 저장된 인용 구절 표시). 채팅 디렉터리 필터는 `/documents/suggest` 결과를 `datalist`로 자동완성합니다.
+- **동기화 화면 구현(`web/src/features/sync/SyncPage.tsx`, `src/api/sync.ts`):** 상태 카드(최근 실행·대기열·오늘 임베딩 x/한도·최근 백업·건너뛴 형식), 제목 옆 경고 배지(`stale`), 보류된 삭제 판정 경고(예시 경로, "삭제 판정 적용" → 확인 창 → 승인 후 "다음 동기화 때 적용" 표시), 수집 범위 편집(루트·편집 가능한 제외 패턴 목록, 고정 제외는 "고정 · 편집 불가"로 삭제 버튼 없이 표시하고 같은 패턴 추가를 막음. "저장"은 먼저 미리보기를 불러 확인 창에 삭제 수·예시·6.5 확인 문구를 보이고, 확인하면 그 수를 `expected_purge`로 저장). "지금 동기화"는 9.3 흐름: 누른 시점의 최근 실행 ID보다 큰 실행이 생기면 "새 실행"으로 봅니다(브라우저 시계와 서버 시계를 비교하지 않음). Windows 판정은 `userAgentData.platform`(없으면 `userAgent`)에 `Win`이 있는지입니다.
 - **채팅 화면 구현(`web/src/features/chat/`):** `ChatPage`(배치, 대화 불러오기, 768px 미만 서랍), `ConversationList`(이름 변경·삭제 확인), `AnswerMarkdown`(마크다운, 인용 칩. `[n]`은 remark 플러그인이 mdast의 text 노드에서만 바꾸므로 `code`·`inlineCode` 안은 그대로), `SourcePanel`(출처 항목, 문서 상세 링크 `/documents/{id}?loc=<위치 JSON>`, 저장된 인용을 화면 상태로 함께 넘김), `FeedbackBar`, `ChatFilters`. 다시 시도는 실패한 질문·답변 말풍선을 지우고 같은 질문·필터를 같은 대화로 다시 보냅니다(실패한 메시지는 DB에 `error`로 남음). "폴더에서 보기"의 `k`는 브라우저가 `crypto.subtle`로 계산합니다(path\_key 식은 10.2와 같음).
 
 ### 9.3 "지금 동기화" 버튼

@@ -7,7 +7,18 @@
 
 from fastapi import APIRouter
 
-from app.api import auth, chat, conversations, documents, feedback, health, index, sync
+from app.api import (
+    auth,
+    chat,
+    conversations,
+    documents,
+    feedback,
+    health,
+    index,
+    settings,
+    sync,
+    sync_web,
+)
 from app.api.deps import WEB_API_DEPENDENCIES
 
 web_router = APIRouter(dependencies=WEB_API_DEPENDENCIES)
@@ -16,6 +27,8 @@ web_router.include_router(conversations.router)
 web_router.include_router(documents.router)
 web_router.include_router(feedback.router)
 web_router.include_router(index.router)
+web_router.include_router(settings.router)
+web_router.include_router(sync_web.router)  # /sync/status 등(세션). Agent용 /sync/*와 경로가 다름
 
 api_router = APIRouter(prefix="/api")
 api_router.include_router(health.router)

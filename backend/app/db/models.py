@@ -115,6 +115,9 @@ class SyncConfig(Base):
     excludes: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     # 웹에서 바꾸지 않는다(Nginx 업로드 상한과 함께 바꿔야 하므로)
     max_file_mb: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("10"))
+    # 대량 삭제 보호로 보류된 판정의 적용 승인(동기화 화면). 다음 manifest 판정이 쓰고 비운다.
+    held_deletions_approved_at: Mapped[datetime | None] = timestamptz()
+    held_deletions_run_id: Mapped[int | None] = mapped_column(BigInteger)
     updated_at: Mapped[datetime] = timestamptz(nullable=False, now=True, onupdate=True)
 
 
