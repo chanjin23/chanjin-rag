@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
 import type { Source } from "@/api/chat";
 import { cn } from "@/lib/cn";
+import { type DetailState, documentDetailHref } from "@/features/documents/links";
 import { fileName, formatDate, formatLocation, isWindows, revealUrl } from "./format";
 
 /**
@@ -76,8 +77,7 @@ function SourceItem({
 }) {
   const location = formatLocation(source.location);
   const bodyId = `source-${source.document_id}-${source.chunk_id ?? "doc"}-${source.n ?? "c"}`;
-  const detailHref =
-    `/documents/${source.document_id}` + (source.chunk_id !== null ? `?chunk=${source.chunk_id}` : "");
+  const detailHref = documentDetailHref(source);
   return (
     <li ref={itemRef} className={cn("rounded-lg border bg-white", open ? "border-sky-300" : "border-slate-200")}>
       <button
@@ -122,6 +122,11 @@ function SourceItem({
               내 PC에서 삭제된 파일입니다. 색인에는 30일 동안 남습니다.
             </p>
           )}
+          {source.deleted && (
+            <p className="rounded bg-slate-100 px-2 py-1 text-slate-600">
+              영구 삭제된 문서입니다. 인용 구절은 가렸습니다.
+            </p>
+          )}
           {source.snippet && (
             <blockquote className="whitespace-pre-wrap border-l-2 border-sky-300 pl-2 text-slate-700" aria-label="인용 구절">
               {source.snippet}
@@ -130,6 +135,7 @@ function SourceItem({
           <div className="flex flex-wrap gap-2">
             <Link
               to={detailHref}
+              state={{ citation: source } satisfies DetailState}
               className="rounded border border-slate-300 px-1.5 py-0.5 hover:bg-slate-100"
             >
               문서 상세

@@ -1,8 +1,11 @@
+import { useQuery } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
 import type { ChatFilters } from "@/api/chat";
+import { DOCUMENTS_KEY, suggestFolders } from "@/api/documents";
 
 /**
  * 질문 필터 (F-07, TRD 9.1): 디렉터리(경로 앞부분), 형식, 수정일(한국 시간 날짜), 로컬 삭제 포함.
- * 화면 상태로만 두고 질문마다 함께 보낸다.
+ * 화면 상태로만 두고 질문마다 함께 보낸다. 디렉터리는 `/documents/suggest`로 폴더 경로를 자동완성한다.
  */
 
 export const EXT_OPTIONS = ["md", "txt", "pdf", "docx", "pptx", "xlsx", "hwp", "hwpx"] as const;
@@ -40,8 +43,24 @@ export function activeFilterCount(f: FilterState): number {
 
 type Props = { value: FilterState; onChange: (next: FilterState) => void };
 
+/** 입력이 멈추고 잠시 뒤의 값(자동완성 요청을 줄인다) */
+function useDebounced<T>(value: T, ms: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(value), ms);
+    return () => clearTimeout(t);
+  }, [value, ms]);
+  return debounced;
+}
+
 export function ChatFiltersForm({ value, onChange }: Props) {
   const set = (patch: Partial<FilterState>) => onChange({ ...value, ...patch });
+  const prefix = useDebounced(value.directory, 200);
+  const suggestions = useQuery({
+    queryKey: [...DOCUMENTS_KEY, "suggest", prefix],
+    queryFn: () => suggestFolders(prefix),
+    staleTime: 30_000,
+  });
   return (
     <fieldset className="mb-2 grid gap-2 rounded-lg border border-slate-200 bg-white p-2 text-xs sm:grid-cols-2">
       <legend className="sr-only">검색 필터</legend>
@@ -51,8 +70,15 @@ export function ChatFiltersForm({ value, onChange }: Props) {
           value={value.directory}
           onChange={(e) => set({ directory: e.target.value })}
           placeholder="C:\Chanjin\dev\문서"
+          list="directory-suggestions"
+          autoComplete="off"
           className="rounded border border-slate-300 px-2 py-1 outline-none focus:border-slate-500"
         />
+        <datalist id="directory-suggestions" data-testid="directory-suggestions">
+          {(suggestions.data ?? []).map((folder) => (
+            <option key={folder} value={folder} />
+          ))}
+        </datalist>
       </label>
       <div className="flex flex-col gap-0.5 sm:col-span-2">
         <span className="text-slate-500">형식</span>

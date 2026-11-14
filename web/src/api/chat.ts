@@ -34,6 +34,8 @@ export type Source = {
   mtime: string;
   snippet: string;
   locally_deleted: boolean;
+  /** 영구 삭제된 문서(사용자 삭제·범위 제외). 인용 구절은 "삭제된 문서"로 가려져 있다(TRD 6.5) */
+  deleted?: boolean;
 };
 
 /** 질의 시점의 검색 범위(TRD 7.1) */

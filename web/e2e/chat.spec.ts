@@ -238,7 +238,7 @@ test.describe("채팅 (F-08 질의 그래프와 SSE)", () => {
     await expect(detail.getByLabel("인용 구절")).toContainText(CODE);
     await expect(detail.getByRole("link", { name: "문서 상세" })).toHaveAttribute(
       "href",
-      /^\/documents\/\d+\?chunk=\d+$/,
+      /^\/documents\/\d+\?loc=%7B.+%7D$/,
     );
     // Windows에서만 "폴더에서 보기"(E2E는 Windows Chrome). 경로 대신 path_key의 SHA-256만 넘긴다
     await expect(detail.getByRole("link", { name: "폴더에서 보기" })).toHaveAttribute(

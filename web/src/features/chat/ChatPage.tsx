@@ -54,7 +54,11 @@ const STAGE_LABEL: Record<Stage, string> = {
 
 const nf = new Intl.NumberFormat("ko-KR");
 
-type RouteState = { createdFrom?: string } | null;
+/** 문서 상세의 "이 문서 요약"이 넘기는 요청(F-09): 새 대화에서 한 번 보낸다 */
+export type SummarizeRequest = { documentId: number; filename: string };
+type RouteState = { createdFrom?: string; summarize?: SummarizeRequest } | null;
+/** 이미 보낸 요약 요청(화면 history 항목 key). StrictMode 재실행·뒤로 가기로 다시 보내지 않게 한다 */
+const sentSummaries = new Set<string>();
 
 /** 찾지 못함 응답의 검색 범위(TRD 7.1 coverage). */
 function CoverageLine({ coverage }: { coverage: Coverage }) {
@@ -253,6 +257,14 @@ function ChatView({ conversationId, viewKey }: { conversationId: string; viewKey
     loaded.current = true;
     setMessages(detail.data.messages.map(fromStored));
   }, [detail.data, setMessages]);
+
+  // 문서 상세에서 "이 문서 요약"으로 들어오면 그 문서를 요약해 달라고 보낸다(summarize_document_id)
+  useEffect(() => {
+    const request = (location.state as RouteState)?.summarize;
+    if (!request || sentSummaries.has(location.key)) return;
+    sentSummaries.add(location.key);
+    void send(`「${request.filename}」 요약해줘`, { summarizeDocumentId: request.documentId });
+  }, [location.key, location.state, send]);
 
   const assistants = messages.filter((m) => m.role === "assistant");
   const current =
