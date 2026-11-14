@@ -415,10 +415,14 @@ class QueryLog(Base):
     """질의 로그. `retrieved`에는 청크 ID와 점수만 둔다(문서를 지워도 그대로 둠, TRD 6.5).
 
     `message_id`는 NULL을 허용한다(대화 없이 실행하는 평가 질의 등).
+    `source`: `chat`(채팅 질문), `eval`(`rag-eval run` 평가 질문).
     """
 
     __tablename__ = "query_logs"
-    __table_args__ = (Index("ix_query_logs_message_id", "message_id"),)
+    __table_args__ = (
+        Index("ix_query_logs_message_id", "message_id"),
+        CheckConstraint("source IN ('chat', 'eval')", name="source"),
+    )
 
     id: Mapped[int] = bigint_pk()
     message_id: Mapped[int | None] = mapped_column(
@@ -434,6 +438,7 @@ class QueryLog(Base):
     coverage: Mapped[dict[str, Any]] = jsonb(EMPTY_JSON_OBJECT)
     latency_ms: Mapped[dict[str, Any]] = jsonb(EMPTY_JSON_OBJECT)
     models: Mapped[dict[str, Any]] = jsonb(EMPTY_JSON_OBJECT)
+    source: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'chat'"))
     created_at: Mapped[datetime] = timestamptz(nullable=False, now=True)
 
 

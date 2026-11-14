@@ -1,4 +1,4 @@
-"""`/api` 아래 라우터 묶음. eval 라우터는 구현할 때 여기에 추가한다.
+"""`/api` 아래 라우터 묶음.
 
 - 공개: `/health`, `/auth/*`(로그인·로그아웃은 CSRF 검사, `/auth/me`는 세션 필요)
 - 웹 API(세션 필수 + CSRF): `web_router` 아래에 붙인다(TRD 8.3)
@@ -12,6 +12,7 @@ from app.api import (
     chat,
     conversations,
     documents,
+    eval,
     feedback,
     health,
     index,
@@ -25,6 +26,7 @@ web_router = APIRouter(dependencies=WEB_API_DEPENDENCIES)
 web_router.include_router(chat.router)
 web_router.include_router(conversations.router)
 web_router.include_router(documents.router)
+web_router.include_router(eval.router)
 web_router.include_router(feedback.router)
 web_router.include_router(index.router)
 web_router.include_router(settings.router)

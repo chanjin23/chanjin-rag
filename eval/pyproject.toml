@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "평가셋 실행 CLI와 지표 리포트 (PRD 8장, TRD 14장)"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "chanjin-rag-backend",
+    "pyyaml>=6",
     "typer>=0.12",
 ]
 

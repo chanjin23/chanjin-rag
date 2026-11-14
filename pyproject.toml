@@ -43,7 +43,7 @@ strict = true
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
-testpaths = ["backend/tests", "agent/tests"]
+testpaths = ["backend/tests", "agent/tests", "eval/tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 # 실제 문서 폴더(SAMPLE_DOCS_DIRS)를 읽는 테스트는 기본 실행에서 뺀다.

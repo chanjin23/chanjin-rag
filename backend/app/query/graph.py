@@ -98,6 +98,9 @@ class QueryTrace:
     models: dict[str, str | None] = field(default_factory=dict)
     intent: str | None = None
     saved: bool = False
+    # 질의 출처(`chat`, `eval`)와 저장된 질의 로그 ID
+    source: str = "chat"
+    log_id: int | None = None
 
     def add_latency(self, key: str, ms: float) -> None:
         self.latency_ms[key] = round(self.latency_ms.get(key, 0.0) + ms, 2)
@@ -578,10 +581,12 @@ async def save_query_log(
         coverage=trace.coverage,
         latency_ms=trace.latency_ms,
         models={**trace.models, "intent": trace.intent},
+        source=trace.source,
     )
     session.add(row)
     await session.flush()
     trace.saved = True
+    trace.log_id = row.id
     return row
 
 

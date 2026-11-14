@@ -58,7 +58,7 @@ def _revision(engine: Engine) -> str | None:
 def test_upgrade_then_downgrade(migrated_db: str, sync_engine: Engine) -> None:
     # 세션 픽스처가 head까지 올려 둔 상태
     assert APP_TABLES <= _tables(sync_engine)
-    assert _revision(sync_engine) == "0004"
+    assert _revision(sync_engine) == "0005"
 
     migrate.downgrade("base", url=migrated_db)
     assert _tables(sync_engine) & APP_TABLES == set()
@@ -72,7 +72,7 @@ def test_upgrade_then_downgrade(migrated_db: str, sync_engine: Engine) -> None:
 
     migrate.upgrade("head", url=migrated_db)
     assert APP_TABLES <= _tables(sync_engine)
-    assert _revision(sync_engine) == "0004"
+    assert _revision(sync_engine) == "0005"
     with sync_engine.connect() as conn:
         # 다시 올려도 초기값은 한 행만 있다
         assert conn.execute(text("select count(*) from sync_config")).scalar_one() == 1

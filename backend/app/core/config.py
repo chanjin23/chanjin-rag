@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     nvidia_llm_api_key: SecretStr | None = None
     nvidia_embed_api_key: SecretStr | None = None
     nvidia_rerank_api_key: SecretStr | None = None
+    # 평가 판정(LLM-as-judge) 모델 키(TRD 14장). 판정 모델은 답변 모델과 다른 계열로 고른다
+    nvidia_judge_api_key: SecretStr | None = None
     nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
     llm_model: str = "nvidia/nemotron-3.5-lightning-30b-a3b"
     # 모델별 추가 요청값(.env에는 JSON 한 줄). 추론을 끄는 키가 모델마다 달라 값 그대로 보낸다.
@@ -66,6 +68,8 @@ class Settings(BaseSettings):
         "https://ai.api.nvidia.com/v1/retrieval/nvidia/nemotron-3.5-rerank-8b/reranking"
     )
     rerank_enabled: bool = True
+    # 평가 판정 모델(PRD 8장: 답변 모델과 달라야 함, `rag-eval run`이 같으면 거절)
+    eval_judge_model: str = "meta/llama-3.3-70b-instruct"
 
     # 질의(TRD 7.1, 7.3). 전체 시간 상한(초)을 넘으면 `timeout` 오류로 끝낸다
     chat_timeout_seconds: float = 60.0
@@ -142,6 +146,7 @@ class Settings(BaseSettings):
             self.nvidia_llm_api_key = None
             self.nvidia_embed_api_key = None
             self.nvidia_rerank_api_key = None
+            self.nvidia_judge_api_key = None
         if self.app_env == "prod" and not self.session_cookie_secure:
             raise ValueError("APP_ENV=prod에서는 SESSION_COOKIE_SECURE=false를 쓸 수 없습니다")
         return self
