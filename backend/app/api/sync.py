@@ -6,17 +6,20 @@
 - 400 경로 검증 실패: `outside_root`, `fixed_exclude`, `excluded`, `relative_path`,
   `unsupported_extension`, `invalid_sha256`
 - 413 `file_too_large`(`max_file_mb` 초과), 409 `hash_mismatch`(서버가 다시 계산한 해시가 다름)
+- 404 `backup_not_found`(백업 이름 규칙에 맞지 않거나 없는 파일, 경로 조작 포함)
 
 로그 상관 키: 업로드·메타 등록은 선택 필드 `run_id`를 받아 로그에 남긴다(실행 단위 추적).
 업로드 로그에는 `document_id`와 해시 앞 8자리(`sha256_prefix`)도 남긴다(경로·파일명 없음).
 """
 
+import asyncio
 import re
 from collections.abc import Awaitable
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Form, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
 
 from app.api.deps import DbSession, require_sync_token
@@ -28,6 +31,7 @@ from app.db.models import SyncRun
 from app.ingest.intake import FileMeta, accept_meta_only, accept_upload
 from app.ingest.scope import FIXED_EXCLUDES, UPLOAD_EXTENSIONS
 from app.jobs.runner import utc_now
+from app.lifecycle.backup import list_backups, resolve_backup
 from app.sync import runs, upload
 from app.sync.manifest import judge_manifest
 from app.sync.scope import SyncScope, load_scope
@@ -352,3 +356,46 @@ async def register_meta(body: MetaIn, db: DbSession) -> MetaOut:
         rejected=len(rejected),
     )
     return MetaOut(accepted=accepted, rejected=rejected)
+
+
+# ---------------------------------------------------------------------------
+# 백업 (TRD 8.2, 10.3, 12.2)
+# ---------------------------------------------------------------------------
+
+
+class BackupOut(BaseModel):
+    name: str
+    size: int
+    sha256: str
+    created_at: datetime
+
+
+class BackupListOut(BaseModel):
+    backups: list[BackupOut]  # 최신 먼저(VM에는 최근 BACKUP_KEEP_ON_VM개)
+
+
+@router.get("/backups/latest")
+async def latest_backups() -> BackupListOut:
+    """VM에 있는 최근 백업 목록(파일명, 크기, SHA-256). Agent는 없는 파일만 내려받는다."""
+    items = await asyncio.to_thread(list_backups, get_settings().backup_path)
+    log.info("backup.listed", count=len(items))
+    return BackupListOut(
+        backups=[
+            BackupOut(name=i.name, size=i.size, sha256=i.sha256, created_at=i.created_at)
+            for i in items
+        ]
+    )
+
+
+@router.get("/backups/{name}")
+async def download_backup(name: str) -> FileResponse:
+    """백업 파일 하나. 이름 규칙(`rag-YYYYMMDD.dump.age`)에 맞고 백업 폴더 바로 아래에 있을 때만.
+
+    경로 조작(`..`, 구분자, 절대 경로, 인코딩된 구분자)은 모두 404 `backup_not_found`.
+    """
+    path = resolve_backup(get_settings().backup_path, name)
+    if path is None:
+        log.warning("backup.download.rejected", reason="not_found")
+        raise ApiError(404, "backup_not_found", "백업 파일을 찾을 수 없습니다")
+    log.info("backup.downloaded", name=path.name, size=path.stat().st_size)
+    return FileResponse(path, media_type="application/octet-stream", filename=path.name)

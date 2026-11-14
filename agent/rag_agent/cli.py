@@ -6,6 +6,7 @@
 환경 변수(개발·테스트·E2E용):
 - `RAG_AGENT_HOME`: 상태 폴더(기본 `%LOCALAPPDATA%\\chanjin-rag`)
 - `RAG_AGENT_SERVER`, `RAG_AGENT_TOKEN`: 서버 주소·토큰(없으면 `login`으로 저장한 값)
+- `RAG_AGENT_BACKUP_DIR`: 백업 내려받을 폴더(기본 `C:\\Chanjin\\dev\\backup`, TRD 10.3)
 - `RAG_AGENT_SCAN_ROOTS`(`;` 구분): 서버 루트를 로컬에서 좁힌다(넓힐 수 없음). 스캔하지 않은 서버
   루트는 `scan_errors`로 보내 그 아래 문서가 삭제로 판정되지 않는다.
 """
@@ -20,6 +21,12 @@ import typer
 
 from rag_agent import credentials, logs
 from rag_agent import install as installer
+from rag_agent.backup import (
+    KEEP_ON_PC,
+    WINDOWS_BACKUP_DIR,
+    BackupFetcher,
+    default_backup_dir,
+)
 from rag_agent.client import SyncClient
 from rag_agent.home import agent_home, log_path, state_db_path
 from rag_agent.lock import MUTEX_NAME, NamedMutexLock
@@ -62,7 +69,11 @@ def _run_sync(home: Path, state: StateDB, source: str) -> SyncOutcome | None:
         return None
     with SyncClient(server, token) as client:
         runner = SyncRunner(
-            client, state, NamedMutexLock(_mutex_name(home)), limit_roots=_limit_roots()
+            client,
+            state,
+            NamedMutexLock(_mutex_name(home)),
+            limit_roots=_limit_roots(),
+            backups=BackupFetcher(client, default_backup_dir()),
         )
         return runner.run(source)
 
@@ -103,6 +114,15 @@ def sync(
         f"사라짐 {s.get('vanished', 0)}, 읽지 못함 {s.get('scan_errors', 0)}, "
         f"해시 재사용 {s.get('hash_reused', 0)}"
     )
+    b = outcome.backups
+    if b is not None:
+        if b.error:
+            typer.echo(f"백업 목록을 받지 못했습니다: {b.error}")
+        else:
+            typer.echo(
+                f"백업: 내려받음 {len(b.downloaded)}, 이미 있음 {b.skipped}, "
+                f"검증 실패 {len(b.mismatched)}, 실패 {len(b.failed)}, 정리 {len(b.pruned)}"
+            )
     skipped = s.get("skipped_formats") or {}
     if skipped:
         typer.echo("건너뛴 형식: " + ", ".join(f"{k} {v}" for k, v in skipped.items()))
@@ -199,16 +219,22 @@ def restore_info() -> None:
     finally:
         state.close()
     root = config.get("allowed_root") if isinstance(config, dict) else None
-    backup_dir = f"{root}\\backup" if root else r"C:\Chanjin\dev\backup"
+    download_dir = str(default_backup_dir())
+    if os.environ.get("RAG_AGENT_BACKUP_DIR", "").strip():
+        backup_dir = download_dir
+    else:
+        backup_dir = f"{root}\\backup" if root else WINDOWS_BACKUP_DIR
     lines = [
         "서버 복구 안내 (TRD 12.2)",
-        f"1. 백업 파일 위치: {backup_dir} (rag-YYYYMMDD.dump.age, 최근 7개)",
+        f"1. 백업 파일 위치: {backup_dir} (rag-YYYYMMDD.dump.age, 최근 {KEEP_ON_PC}개)",
         "2. 새 VM에서 Compose로 db만 띄웁니다.",
         "3. 백업 파일을 VM으로 복사합니다(Tailscale scp).",
         "4. age -d -i <개인키> 로 복호화합니다(개인키는 PC와 비밀번호 관리자에 보관).",
         "5. pg_restore로 복원한 뒤 api와 worker를 띄웁니다(deploy/scripts/restore.sh).",
         "6. 다음 `rag-agent sync`에서 백업 이후 바뀐 파일만 다시 올라갑니다.",
     ]
+    if download_dir != backup_dir:
+        lines.insert(2, f"   (이 PC에서 내려받는 폴더: {download_dir})")
     for line in lines:
         typer.echo(line)
 

@@ -629,6 +629,8 @@ export function SyncPage() {
               </Card>
               <Card title="최근 백업" testId="last-backup">
                 <p>{s.last_backup_at ? formatRelative(s.last_backup_at) : "백업 기록 없음"}</p>
+                {s.last_backup_name && <p className="text-xs text-slate-500">{s.last_backup_name}</p>}
+                <p className="text-xs text-slate-500">PC에는 동기화 때 내려받아 최근 7개 보관</p>
               </Card>
             </div>
             <Card title="건너뛴 형식" testId="skipped-formats">

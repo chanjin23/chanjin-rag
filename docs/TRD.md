@@ -391,7 +391,7 @@ Worker는 하나의 프로세스에서 작업 루프와 APScheduler를 함께 �
 
 **구현 세부(`backend/app/jobs/`, `backend/app/ingest/{intake,scope,local}.py`)**
 
-- 실행: `rag-backend worker`. 준비 루프(`extract`·`index`, 파싱은 한 번에 하나)와 임베딩 루프(`embed`, API 호출 동시 2개)를 함께 돌립니다. APScheduler는 30초마다 하트비트(`worker_heartbeats`), 1분마다 멈춘 작업 재대기, 매일 0시(한국 시간)에 임베딩 루프를 깨웁니다. 한도는 날짜 키(`embed_quota.day`)가 바뀌어 자연히 초기화됩니다.
+- 실행: `rag-backend worker`. 준비 루프(`extract`·`index`, 파싱은 한 번에 하나)와 임베딩 루프(`embed`, API 호출 동시 2개)를 함께 돌립니다. APScheduler는 30초마다 하트비트(`worker_heartbeats`), 1분마다 멈춘 작업 재대기, 매일 0시(한국 시간)에 임베딩 루프를 깨웁니다. 한도는 날짜 키(`embed_quota.day`)가 바뀌어 자연히 초기화됩니다. 매일 03:00 DB 백업(`backup`, 12.2), 매일 04:00 보관 기간이 지난 로컬 삭제 문서 영구 삭제(`retention_purge`, 6.5)도 이 스케줄러가 돌립니다.
 - 접수(업로드와 `ingest-local` 공용): `path_key`로 문서를 찾아, 해시가 같고 `needs_upload`가 아니면 아무것도 하지 않습니다. 새 버전이면 상태를 `queued`로 되돌리고, 임시 원본을 `UPLOAD_TMP_DIR/{document_id}-{sha256}{확장자}`에 두고 `extract`를 등록합니다. 10MB 초과는 원본 없이 파일명 청크만 만듭니다(`meta_only`).
 - 가져갈 때도 작업의 `sha256`이 문서의 현재 해시와 다르면 바로 버립니다(`done`, `job.discarded_stale`). 그래서 지난 버전의 `embed`는 한도를 차감하지 않습니다.
 - 한도가 차면 이미 차감한 버전(429로 반납된 작업 등)만 가져가고, 그것도 없으면 다음 날 0시(한국 시간)까지 쉽니다(`quota.exhausted`, 같은 날·같은 이유는 한 번만 기록). 청크 상한은 차감 여부와 상관없이 새 `embed`를 막습니다.
@@ -464,6 +464,7 @@ Worker는 하나의 프로세스에서 작업 루프와 APScheduler를 함께 �
 - **확인 문구:** 범위 제외와 사용자 삭제의 확인 창에 "백업 파일에는 최대 7일(PC)까지 남습니다. 이미 NVIDIA API로 보낸 텍스트는 되돌릴 수 없습니다."를 표시합니다.
 - **로그:** 삭제는 `documents.purged` 구조화 로그 이벤트로 남깁니다(원인, 개수만, 경로 제외).
 - **구현:** `backend/app/ingest/purge.py`의 `purge_documents(ids, reason)` 하나로 처리합니다(`reason`: `user`·`scope`·`retention`). `user`·`scope`는 인용을 가리고(`messages.citations`의 해당 문서 항목 `snippet`을 "삭제된 문서"로, `deleted: true` 추가. 번호·경로는 둠), `retention`은 그대로 둡니다. sections·chunks·jobs는 외래 키 `ON DELETE CASCADE`로 함께 지우고 임시 원본(`{id}-*`)도 지웁니다. 로그 필드: `reason`, `documents`, `sections`, `chunks`, `jobs`, `masked_messages`.
+- **30일 자동 삭제 구현:** `backend/app/lifecycle/retention.py`의 `purge_expired(now, days)`가 `locally_deleted`이고 `deleted_at <= now - LOCAL_DELETED_RETENTION_DAYS`인 문서를 `reason=retention`으로 지웁니다(`deleted_at`이 없는 문서는 기간을 셀 수 없어 둡니다). Worker 예약 작업 ID `retention_purge`(매일 04:00 한국 시간), 수동 실행은 `rag-backend purge-retention`. 아무것도 지우지 않아도 `documents.purged`(`documents: 0`)를 남겨 작업이 돌았는지 확인할 수 있습니다.
 
 ## 7. 질의 파이프라인
 
@@ -691,9 +692,11 @@ NVIDIA API 실측값(13장)이 예산을 넘으면 rewrite 생략 조건을 넓�
   - 완료 요청: `{status: succeeded|failed, stats, error?}`. `stats`는 그대로 저장하되 서버가 판정 때 남긴 `manifest`, `deletion_held` 키는 덮지 않습니다.
   - `POST /sync/files/meta` 요청: `{files: [{path, size, mtime, sha256}]}`. 응답: `accepted`(`[{path, document_id, outcome}]`), `rejected`(`max_file_mb` 이하면 `not_over_limit`).
   - 업로드 요청은 선택 필드 `run_id`를, 메타 등록 요청은 선택 키 `run_id`를 받습니다. 로그 상관 키로만 씁니다.
+  - `GET /sync/backups/latest`: `{backups: [{name, size, sha256, created_at}]}`(VM에 있는 백업 전부, 최신 먼저. 이름 규칙 `rag-YYYYMMDD.dump.age`에 맞는 일반 파일만, 심볼릭 링크 제외). SHA-256은 백업을 만들 때 쓴 옆 파일 `<이름>.sha256`을 읽고, 없으면 계산해 다시 씁니다.
+  - `GET /sync/backups/{name}`: 파일 그대로(`application/octet-stream`). 이름이 규칙에 맞고 실제 경로가 백업 폴더 바로 아래일 때만 내려주고, 그 밖(`..`, `/`·`\\`·인코딩된 구분자, 다른 파일, 폴더 밖을 가리키는 링크)은 모두 404 `backup_not_found`.
   - 업로드 응답: `{document_id, outcome: queued|unchanged}`. 받는 중에는 `UPLOAD_TMP_DIR`의 임시 파일(`incoming-*.part`)에 쓰고, 검증이 끝나면 `{document_id}-{sha256}{ext}`로 옮겨 `extract` 작업을 등록합니다.
-- 오류 코드: 404 `run_not_found`, 409 `run_finished`(끝난 실행), 400 `outside_root`·`fixed_exclude`·`excluded`·`relative_path`·`unsupported_extension`·`invalid_sha256`, 413 `file_too_large`, 409 `hash_mismatch`.
-- 로그(경로·파일명 없이 건수와 ID만, 업로드 관련 로그는 `run_id`와 해시 앞 8자리 `sha256_prefix`를 함께 남김): `sync.run.started`, `sync.manifest.judged`, `sync.deletion.held`(`reason`: `mass_delete_guard`·`scan_error`), `sync.file.uploaded`, `sync.file.rejected`, `sync.file.hash_mismatch`, `sync.file.meta_registered`, `sync.run.completed`, `sync.run.abandoned`, `sync.run.resumed`.
+- 오류 코드: 404 `backup_not_found`, 404 `run_not_found`, 409 `run_finished`(끝난 실행), 400 `outside_root`·`fixed_exclude`·`excluded`·`relative_path`·`unsupported_extension`·`invalid_sha256`, 413 `file_too_large`, 409 `hash_mismatch`.
+- 로그(경로·파일명 없이 건수와 ID만, 업로드 관련 로그는 `run_id`와 해시 앞 8자리 `sha256_prefix`를 함께 남김): `sync.run.started`, `sync.manifest.judged`, `sync.deletion.held`(`reason`: `mass_delete_guard`·`scan_error`), `sync.file.uploaded`, `sync.file.rejected`, `sync.file.hash_mismatch`, `sync.file.meta_registered`, `sync.run.completed`, `sync.run.abandoned`, `sync.run.resumed`, `backup.listed`(`count`), `backup.downloaded`(`name`, `size`), `backup.download.rejected`.
 
 ### 8.3 웹 API (세션)
 
@@ -723,7 +726,7 @@ NVIDIA API 실측값(13장)이 예산을 넘으면 rewrite 생략 조건을 넓�
 - 피드백(`app/api/feedback.py`): 본문 `{rating: 1 | -1, reason?, note?(2,000자 이하, 빈 문자열은 NULL)}`. `message_id` 기준 `INSERT … ON CONFLICT DO UPDATE`로 덮어쓰며 `failure_type`·`reviewed_at`은 그대로 둡니다. 답변이 아닌 메시지·없는 메시지는 404 `message_not_found`. 로그 `feedback.saved`(메시지 ID, 평가, 사유, 메모 유무. 메모 원문은 남기지 않음).
 - 문서(`app/api/documents.py`): `GET /documents`는 `status`(여러 번 가능), `ext`(점 없이도 됨), `path`(폴더 앞부분, 폴더 경계로 자르고 대소문자 무시), `q`(경로·파일명 부분 일치, 대소문자 무시), `locally_deleted`, `page`(1부터), `page_size`(기본 50, 최대 200)를 받고 수정 시각 최신순 `{items, total, page, page_size, counts}`를 줍니다. `counts`는 필터와 무관한 상태별 개수와 `locally_deleted` 개수(화면 탭 숫자). 항목: `id`, `path`, `filename`, `ext`, `size`, `mtime`, `status`, `failure_code`, `failure_detail`, `locally_deleted`, `deleted_at`, `needs_upload`, `chunks`(청크 수), `updated_at`. `GET /documents/{id}`는 여기에 `sections`(`seq`, `location`, `heading_path`, `kind`, `text`)를 더합니다. `POST /documents/{id}/reprocess`: `failed`·`no_text`(또는 섹션이 없는 `ready`·`indexed`)는 `needs_upload=true`만 표시(상태·사유는 그대로, 다시 올라오면 새로 판정) → `action: needs_upload`. `ready`·`indexed`는 기다리는 `index`·`embed` 작업을 `done`으로 정리하고 상태를 `extracting`(처리 중)으로 바꾼 뒤 `index` 작업을 등록 → Worker가 sections에서 재청킹(같은 임베딩 입력이면 벡터 재사용, 같은 버전이라 한도도 다시 차감하지 않음) → `action: rechunk`. 그 밖의 상태(대기·처리 중·파일명만)는 409 `not_reprocessable`. `DELETE`는 204(6.5 구현). `GET /documents/suggest?prefix=`는 앞부분 바로 다음 단계까지의 폴더 경로(원래 표기, 최대 20개). 숫자가 아니거나 없는 문서는 404 `document_not_found`. 로그: `documents.listed`(쓴 필터 이름과 개수, 검색어 원문 없음), `documents.read`, `documents.suggested`, `documents.reprocess.requested`(문서 ID, 이전 상태, 방식, 실패 코드), `documents.purged`.
 - 동기화 범위 설정(`app/api/settings.py`, `app/sync/settings.py`): `GET`은 `allowed_root`, `roots`, `excludes`(`[{pattern, fixed}]`, 고정 제외가 `fixed: true`로 앞에), `max_file_mb`, `updated_at`. 미리보기·저장 본문은 `{roots, excludes}`(편집 가능한 패턴만. 고정 제외는 대소문자·구분자를 무시하고 걸러 저장하지 않음). 루트는 공백·끝 구분자를 정리하고 `path_key`가 같은 것은 하나만 남기며, 허용 폴더 하위가 아니면 400 `outside_root`(`..` 포함), 상대 경로면 `relative_path`, 고정 제외 아래면 `fixed_exclude`. 미리보기는 `{count, examples(경로 소문자순 10개), roots, excludes}`. 저장은 선택 값 `expected_purge`(확인 창의 수)가 실제 삭제 수와 다르면 409 `preview_outdated`(`count` 포함, 웹은 다시 미리보기)이고, 성공하면 설정 응답 + `purged`. 로그: `settings.sync.read`, `settings.sync.previewed`(삭제 수, 루트·패턴 수), `settings.sync.updated`(루트·패턴 수와 추가·제거 수, `purged`, `masked_messages`), `settings.sync.rejected`(이유), `documents.purged`(`reason: scope`). 경로·패턴 원문은 남기지 않습니다.
-- 동기화 상태(`app/api/sync_web.py`, 웹 세션. Agent용 `/sync/*`와 경로가 겹치지 않음): `GET /sync/status`는 `now`, `running`(진행 중 실행), `latest_run`, `last_success_at`(실행 요약: `id`, `source`, `status`, `started_at`, `heartbeat_at`, `finished_at`, `counts`(manifest 판정 건수·업로드 수), `error`), `queue`(`queued`, `running`, `by_type`), `embed`(`used`, `limit`), `last_backup_at`(백업 기록은 T14부터, 그 전에는 null), `held_deletions`(판정을 받은 가장 최근 실행의 `stats.deletion_held.mass_delete`: `run_id`, `count`, `total`, `ratio`, `threshold`, `sample` 10개, `approved_at`), `skipped_formats`(마지막 성공 실행), `stale`(`sync`·`backup`: 없거나 24시간 넘음, 서버 시각 기준). `POST /sync/held-deletions/apply`(`{run_id?}`)는 승인을 기록하고 `{run_id, count, approved_at}`, 보류가 없으면 409 `no_held_deletions`, 화면의 실행과 다르면 409 `held_deletions_outdated`. `POST /sync/run-requests`(202)는 웹의 "지금 동기화" 클릭을 로그로만 남깁니다(`sync.run.requested`). 상태 조회 로그 `sync.status.read`는 2초 간격 조회라 debug 수준입니다.
+- 동기화 상태(`app/api/sync_web.py`, 웹 세션. Agent용 `/sync/*`와 경로가 겹치지 않음): `GET /sync/status`는 `now`, `running`(진행 중 실행), `latest_run`, `last_success_at`(실행 요약: `id`, `source`, `status`, `started_at`, `heartbeat_at`, `finished_at`, `counts`(manifest 판정 건수·업로드 수), `error`), `queue`(`queued`, `running`, `by_type`), `embed`(`used`, `limit`), `last_backup_at`·`last_backup_name`(백업 폴더 `BACKUP_DIR`에서 가장 새 `rag-YYYYMMDD.dump.age`의 수정 시각·파일명, 없으면 null), `held_deletions`(판정을 받은 가장 최근 실행의 `stats.deletion_held.mass_delete`: `run_id`, `count`, `total`, `ratio`, `threshold`, `sample` 10개, `approved_at`), `skipped_formats`(마지막 성공 실행), `stale`(`sync`·`backup`: 없거나 24시간 넘음, 서버 시각 기준). `POST /sync/held-deletions/apply`(`{run_id?}`)는 승인을 기록하고 `{run_id, count, approved_at}`, 보류가 없으면 409 `no_held_deletions`, 화면의 실행과 다르면 409 `held_deletions_outdated`. `POST /sync/run-requests`(202)는 웹의 "지금 동기화" 클릭을 로그로만 남깁니다(`sync.run.requested`). 상태 조회 로그 `sync.status.read`는 2초 간격 조회라 debug 수준입니다.
 - 색인 범위(`app/api/index.py`): `by_status`(상태별 문서 수), `total_docs`·`bm25_docs`·`vector_docs`·`pending_docs`(질의의 검색 범위와 같은 기준), `embed_waiting`(`queued`·`extracting`·`indexed`·`embedding` 문서 수), `daily_limit`, `used_today`, `estimated_completion`(오늘 남은 한도를 먼저 쓰고 나머지를 하루 한도로 나눈 날 수를 더한 한국 시간 날짜, 기다리는 파일이 없으면 null). 로그 `index.coverage.read`.
 
 FastAPI의 OpenAPI 스키마에서 `openapi-typescript`로 웹의 타입을 생성합니다. API를 바꾸면 웹 타입도 같이 갱신합니다.
@@ -833,6 +836,8 @@ web/src/
 - 내려받은 뒤 SHA-256을 검증하고, 실패하면 파일을 지우고 다음 실행에서 다시 받습니다.
 - 날짜순으로 7개를 넘는 오래된 파일은 삭제합니다.
 - 이 폴더는 고정 제외(`/backup/`)에 들어 있어 웹에서 제외 패턴을 바꿔도 다시 업로드되지 않습니다.
+- **구현(`agent/rag_agent/backup.py`의 `BackupFetcher`):** 동기화가 `succeeded`로 끝났을 때만 실행하고, 실패해도 동기화 결과는 바꾸지 않습니다. 저장 위치는 `RAG_AGENT_BACKUP_DIR`, 없으면 Windows는 `C:\Chanjin\dev\backup`(그 밖 OS는 개발용으로 상태 폴더 아래 `backup`). 서버 목록에서 이름 규칙(`rag-YYYYMMDD.dump.age`)·SHA-256 형식에 맞지 않는 항목은 무시하고(폴더 밖에 쓰지 않음), 같은 이름이 있으면 받지 않습니다. 받는 중에는 `<이름>.part`에 쓰고 검증이 끝나면 옮깁니다. 정리는 이름(날짜)순이며 규칙에 맞지 않는 파일은 건드리지 않습니다. `rag-agent sync` 출력에 `백업: 내려받음 N, 이미 있음 N, 검증 실패 N, 실패 N, 정리 N`을 붙입니다.
+- 로그(`agent.log`, 파일명은 `file` 필드): `agent.backup.downloaded`(`file`, `size`, `sha256_prefix`), `agent.backup.hash_mismatch`, `agent.backup.failed`(`stage`: `list`·`mkdir`·`download`), `agent.backup.pruned`, `agent.backup.checked`. 서버 쪽은 `backup.listed`·`backup.downloaded`(8.2).
 
 ## 11. 보안
 
@@ -896,12 +901,15 @@ web/src/
 | `TZ` | `Asia/Seoul` | 한도 초기화와 예약 작업 기준 |
 | `BACKUP_AGE_RECIPIENT` | | age 공개키 |
 | `BACKUP_KEEP_ON_VM` | `3` | |
+| `BACKUP_DIR` | (비움: 저장소 `var/backups`) | VM 백업 폴더(`backups/`). Worker와 API가 같은 폴더를 씀 |
+| `BACKUP_PG_DUMP_CMD`, `BACKUP_AGE_CMD` | `["pg_dump"]`, `["age"]` | 백업 외부 명령(JSON 목록, 실행 파일과 앞쪽 인자). 인자는 코드가 붙임. E2E는 가짜 명령(`web/e2e/fixtures`) |
 
 ### 12.2 백업과 복구
 
 - **매일 03:00(한국 시간):** Worker의 APScheduler가 `pg_dump -Fc` 결과를 `age -r <공개키>`로 암호화합니다. 파일명은 `backups/rag-YYYYMMDD.dump.age`이고, VM에는 최근 3개만 둡니다. 이를 위해 `backend` 이미지에 PostgreSQL 17 클라이언트를 넣습니다.
+- **구현(`backend/app/lifecycle/backup.py`의 `create_backup`):** `pg_dump -Fc -f <임시 평문> --dbname=<비밀번호 뺀 주소>`(비밀번호는 `PGPASSWORD`) → `age -r <공개키> -o <임시 암호문> <임시 평문>` → `rag-YYYYMMDD.dump.age`로 옮기고 SHA-256을 `<이름>.sha256`에 씀 → 이름(날짜)순으로 최근 `BACKUP_KEEP_ON_VM`개만 남김(옆 파일 포함). 임시 평문·암호문은 성공·실패와 관계없이 지웁니다. 같은 날 다시 만들면 그날 파일을 덮습니다. 외부 명령은 주입 가능한 실행기(`CommandRunner`, 기본 `subprocess` 인자 목록 실행, 셸 없음)로 감싸 pytest는 가짜 실행기로 확인합니다. Worker 예약 작업 ID `backup`(매일 03:00), 수동 실행은 `rag-backend backup` 또는 `deploy/scripts/backup.sh`(직접 `pg_dump | age`, `--compose`면 worker 컨테이너에서 `rag-backend backup`). 로그: `backup.created`(`name`, `size`, `sha256_prefix`, `kept`, `removed`), `backup.failed`(`stage`: `config`·`pg_dump`·`age`·`store`, `error`: `no_recipient`·`exit_<코드>` 등). DB 주소·비밀번호·공개키는 남기지 않습니다. 동기화 화면 "최근 백업"은 가장 새 백업 파일의 시각과 이름입니다.
 - **PC 보관:** Sync Agent가 실행될 때마다 내려받아 7개를 보관합니다(10.3).
-- **복구 절차(`deploy/scripts/restore.sh`):**
+- **복구 절차(`deploy/scripts/restore.sh <백업> [개인키]`, 옆에 `.sha256`이 있으면 먼저 검증, 덮어쓰기 확인 후 진행):**
   1. 새 VM에 Compose를 띄웁니다. 이때 `db`만 띄웁니다.
   2. PC에서 백업 파일을 VM으로 복사합니다(Tailscale `scp`).
   3. `age -d -i 개인키`로 복호화합니다. 개인키는 PC에서만 쓰므로 복호화는 PC에서 하고 평문 덤프를 옮기는 방법도 허용합니다.

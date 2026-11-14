@@ -4,6 +4,7 @@
 토큰은 헤더에만 넣고 로그·예외 메시지에 남기지 않는다.
 """
 
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -12,6 +13,7 @@ from rag_agent.scan import ScannedFile
 
 DEFAULT_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 UPLOAD_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
+DOWNLOAD_TIMEOUT = httpx.Timeout(300.0, connect=10.0)
 
 
 class ApiError(Exception):
@@ -110,3 +112,23 @@ class SyncClient:
         if error:
             body["error"] = error
         _raise_for(self._http.post(f"/runs/{run_id}/complete", json=body))
+
+    def list_backups(self) -> list[dict[str, Any]]:
+        """`GET /backups/latest` → 최근 백업 목록(최신 먼저)."""
+        items = self._json(self._http.get("/backups/latest"))["backups"]
+        if not isinstance(items, list):
+            raise ApiError(200, "invalid_response")
+        return [i for i in items if isinstance(i, dict)]
+
+    def download_backup(self, name: str, dest: Path) -> int:
+        """백업 파일 하나를 `dest`에 내려받는다(스트리밍). 받은 바이트 수."""
+        size = 0
+        with self._http.stream("GET", f"/backups/{name}", timeout=DOWNLOAD_TIMEOUT) as resp:
+            if not resp.is_success:
+                resp.read()
+                _raise_for(resp)
+            with dest.open("wb") as f:
+                for block in resp.iter_bytes():
+                    f.write(block)
+                    size += len(block)
+        return size

@@ -8,7 +8,8 @@ Agent 전용 Sync API(`app/api/sync.py`, Bearer 토큰)와 같은 `/sync` 접두
   - `latest_run`: 가장 최근 실행, `last_success_at`: 마지막 성공 실행의 종료 시각
   - `queue`: 대기·실행 중 작업 수(종류별 `by_type`)
   - `embed`: 오늘(한국 시간) 임베딩 파일 사용량 `used`/`limit`
-  - `last_backup_at`: 최근 백업 시각(백업 생성은 T14. 기록이 없으면 null)
+  - `last_backup_at`: 최근 백업 시각(백업 폴더에서 가장 새 백업 파일의 수정 시각. 없으면 null),
+    `last_backup_name`: 그 파일명
   - `held_deletions`: 판정을 받은 가장 최근 실행이 대량 삭제 보호로 보류했으면 건수·분모·비율·예시와
     승인 시각(`approved_at`, 승인했으면 다음 실행에서 적용)
   - `skipped_formats`: 마지막 성공 실행의 건너뛴 형식별 건수(Agent `stats.skipped_formats`)
@@ -23,6 +24,7 @@ Agent 전용 Sync API(`app/api/sync.py`, Bearer 토큰)와 같은 `/sync` 접두
   `sync.held_deletions.applied`.
 """
 
+import asyncio
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -38,6 +40,7 @@ from app.db.enums import JobStatus, JobType, SyncRunStatus
 from app.db.models import EmbedQuota, Job, SyncConfig, SyncRun
 from app.jobs.quota import quota_day
 from app.jobs.runner import utc_now
+from app.lifecycle.backup import latest_backup
 
 router = APIRouter(prefix="/sync", tags=["sync-web"])
 log = get_logger(__name__)
@@ -91,6 +94,7 @@ class SyncStatusOut(BaseModel):
     queue: QueueOut
     embed: EmbedUsage
     last_backup_at: datetime | None
+    last_backup_name: str | None  # 가장 새 백업 파일명(rag-YYYYMMDD.dump.age)
     held_deletions: HeldDeletions | None
     skipped_formats: dict[str, int]
     stale: StaleOut
@@ -190,7 +194,8 @@ async def sync_status(db: DbSession) -> SyncStatusOut:
 
     used = await db.scalar(select(EmbedQuota.used).where(EmbedQuota.day == quota_day(now))) or 0
     config = await db.get(SyncConfig, 1)
-    last_backup_at: datetime | None = None  # 백업 생성·기록은 T14
+    last_backup = await asyncio.to_thread(latest_backup, settings.backup_path)
+    last_backup_at = last_backup[1] if last_backup else None
     result = SyncStatusOut(
         now=now,
         running=_summary(running) if running is not None else None,
@@ -199,6 +204,7 @@ async def sync_status(db: DbSession) -> SyncStatusOut:
         queue=QueueOut(queued=queued, running=running_jobs, by_type=by_type),
         embed=EmbedUsage(used=int(used), limit=settings.embed_daily_file_limit),
         last_backup_at=last_backup_at,
+        last_backup_name=last_backup[0] if last_backup else None,
         held_deletions=await _held(db, config),
         skipped_formats=_skipped_formats(success),
         stale=StaleOut(sync=_stale(last_success_at, now), backup=_stale(last_backup_at, now)),

@@ -123,6 +123,15 @@ class Settings(BaseSettings):
     tz: str = "Asia/Seoul"
     backup_age_recipient: str | None = None
     backup_keep_on_vm: int = 3
+    # 백업 파일 폴더(TRD 12.2 `backups/`). 비우면 저장소의 var/backups
+    backup_dir: str | None = None
+    # 백업 외부 명령(JSON 목록, 앞부분만. 인자는 코드가 붙인다). E2E는 가짜 명령 스크립트를 넘긴다
+    backup_pg_dump_cmd: list[str] = ["pg_dump"]
+    backup_age_cmd: list[str] = ["age"]
+
+    @property
+    def backup_path(self) -> Path:
+        return Path(self.backup_dir) if self.backup_dir else REPO_ROOT / "var" / "backups"
 
     @model_validator(mode="after")
     def _guard_test_env(self) -> "Settings":

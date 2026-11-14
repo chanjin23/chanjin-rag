@@ -76,6 +76,8 @@ test("Sync Agent: rag-agent sync가 폴더를 스캔해 판정대로 업로드�
     RAG_AGENT_SERVER: API_URL,
     RAG_AGENT_TOKEN: token,
     RAG_AGENT_SCAN_ROOTS: folder,
+    // 백업 내려받기 폴더(T14). 실제 백업 폴더(C:\Chanjin\dev\backup)를 건드리지 않게 상태 폴더 아래로
+    RAG_AGENT_BACKUP_DIR: path.join(home, "backup"),
   };
   const agent = (...args: string[]) =>
     spawnSync("uv", ["run", "rag-agent", ...args], {

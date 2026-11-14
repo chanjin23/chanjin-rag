@@ -9,6 +9,8 @@
 - APScheduler: 30초마다 하트비트(`worker_heartbeats`), 1분마다 멈춘 작업 재대기와
   하트비트가 끊긴 동기화 실행의 `abandoned` 처리(`SYNC_RUN_STALE_MINUTES`),
   매일 0시(한국 시간)에 임베딩 루프를 깨운다. 한도는 날짜 키가 바뀌어 자연히 초기화된다.
+- 데이터 수명주기(TRD 6.5, 12.2): 매일 03:00 DB 암호화 백업(`backup`), 매일 04:00 보관 기간이
+  지난 로컬 삭제 문서 영구 삭제(`retention_purge`).
 """
 
 import asyncio
@@ -24,6 +26,8 @@ from app.core.logging import get_logger
 from app.db.models import WorkerHeartbeat
 from app.jobs.quota import QuotaExhausted, quota_tz
 from app.jobs.runner import PREP_TYPES, JobRunner
+from app.lifecycle.backup import BackupResult, CommandRunner, create_backup, subprocess_runner
+from app.lifecycle.retention import purge_expired
 from app.sync.runs import abandon_stale_runs
 
 log = get_logger(__name__)
@@ -41,8 +45,10 @@ class Worker:
         sessionmaker: async_sessionmaker[AsyncSession],
         *,
         name: str = "worker",
+        command_runner: CommandRunner = subprocess_runner,
     ) -> None:
         self.runner = runner
+        self.command_runner = command_runner
         self.sessionmaker = sessionmaker
         self.name = name
         self.poll_seconds = runner.settings.worker_poll_seconds
@@ -107,6 +113,29 @@ class Worker:
     async def _sync_runs_job(self) -> None:
         await self._safe("abandon_stale_sync_runs", self.abandon_stale_sync_runs())
 
+    async def purge_retention(self) -> int:
+        """보관 기간(`LOCAL_DELETED_RETENTION_DAYS`)이 지난 로컬 삭제 문서를 영구 삭제한다."""
+        days = self.runner.settings.local_deleted_retention_days
+        async with self.sessionmaker() as s, s.begin():
+            result = await purge_expired(s, now=self.runner.clock(), days=days)
+        return result.documents
+
+    async def _retention_job(self) -> None:
+        await self._safe("retention_purge", self.purge_retention())
+
+    async def backup(self) -> BackupResult:
+        """DB 암호화 백업(외부 명령이라 스레드에서 실행)."""
+        return await asyncio.to_thread(
+            create_backup,
+            self.runner.settings,
+            now=self.runner.clock(),
+            runner=self.command_runner,
+        )
+
+    async def _backup_job(self) -> None:
+        # 실패는 create_backup이 backup.failed로 남긴다
+        await self._safe("backup", self.backup())
+
     async def _midnight_job(self) -> None:
         log.info("quota.day_started")
         self._embed_wake.set()
@@ -161,6 +190,8 @@ class Worker:
             id="abandon_stale_sync_runs",
         )
         scheduler.add_job(self._midnight_job, "cron", hour=0, minute=0, id="quota_midnight")
+        scheduler.add_job(self._backup_job, "cron", hour=3, minute=0, id="backup")
+        scheduler.add_job(self._retention_job, "cron", hour=4, minute=0, id="retention_purge")
         return scheduler
 
     async def run(self) -> None:

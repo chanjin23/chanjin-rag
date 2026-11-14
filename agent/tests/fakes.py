@@ -55,6 +55,9 @@ class FakeSyncServer:
         self.next_run = 1
         self.fail_upload: Callable[[str], bool] = lambda path: False
         self.on_manifest: Callable[[dict[str, Any]], None] = lambda body: None
+        # 백업(TRD 10.3): 이름 → 내용. `backup_sha`로 목록의 SHA-256을 바꿔 검증 실패를 흉내 낸다
+        self.backups: dict[str, bytes] = {}
+        self.backup_sha: dict[str, str] = {}
 
     # -- 요청 처리 ---------------------------------------------------------
 
@@ -86,6 +89,22 @@ class FakeSyncServer:
                 {"path": f["path"], "document_id": 1, "outcome": "meta_only"} for f in body["files"]
             ]
             return httpx.Response(200, json={"accepted": accepted, "rejected": []})
+        if request.method == "GET" and path == "/backups/latest":
+            items = [
+                {
+                    "name": name,
+                    "size": len(data),
+                    "sha256": self.backup_sha.get(name, hashlib.sha256(data).hexdigest()),
+                    "created_at": "2026-11-14T18:00:00+00:00",
+                }
+                for name, data in sorted(self.backups.items(), reverse=True)
+            ]
+            return httpx.Response(200, json={"backups": items})
+        if request.method == "GET" and path.startswith("/backups/"):
+            data = self.backups.get(path.removeprefix("/backups/"))
+            if data is None:
+                return self._error(404, "backup_not_found")
+            return httpx.Response(200, content=data)
         if request.method == "POST" and path.endswith("/complete"):
             self.completes.append(json.loads(request.content))
             return httpx.Response(200, json={"status": "succeeded"})

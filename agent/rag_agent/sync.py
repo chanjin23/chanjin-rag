@@ -1,6 +1,7 @@
 """동기화 한 번 실행 (TRD 6.1 시퀀스, F-02·F-03).
 
-config → runs → 스캔(해시 캐시) → manifest → 업로드 → 메타 등록 → complete.
+config → runs → 스캔(해시 캐시) → manifest → 업로드 → 메타 등록 → complete → 백업 수신(TRD 10.3).
+- 백업 수신은 `backups`(BackupFetcher)를 줄 때만 하고, 실패해도 동기화 결과는 바꾸지 않는다.
 - 단일 인스턴스: 잠금을 얻지 못하면 서버에 아무 요청도 하지 않고 바로 끝낸다.
 - 실행 중 1분마다 heartbeat(별도 스레드). 실패해도 동기화는 계속한다.
 - 판정 뒤 업로드 전에 사라진 파일은 건너뛴다.
@@ -20,6 +21,7 @@ from typing import Any, Literal
 
 import httpx
 
+from rag_agent.backup import BackupFetcher, BackupFetchResult
 from rag_agent.client import ApiError, SyncClient
 from rag_agent.keys import make_path_key
 from rag_agent.lock import InstanceLock
@@ -40,6 +42,7 @@ class SyncOutcome:
     run_id: int | None = None
     stats: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
+    backups: BackupFetchResult | None = None
 
 
 class Heartbeat:
@@ -115,8 +118,10 @@ class SyncRunner:
         limit_roots: list[str] | None = None,
         clock: Callable[[], float] = time.time,
         logger: logging.Logger | None = None,
+        backups: BackupFetcher | None = None,
     ) -> None:
         self.client = client
+        self.backups = backups
         self.state = state
         self.lock = lock
         self.opener = opener
@@ -165,6 +170,8 @@ class SyncRunner:
             except (ApiError, httpx.HTTPError):
                 pass
             outcome = SyncOutcome(status="failed", run_id=run_id, stats=stats, error=error)
+        if outcome.status == "succeeded" and self.backups is not None:
+            outcome.backups = self.backups.fetch(run_id)
         self._save_last(outcome, source, started)
         return outcome
 

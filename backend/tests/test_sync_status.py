@@ -5,14 +5,17 @@
 """
 
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 from chat_seed import seed_doc
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from structlog.testing import capture_logs
 
+from app.core.config import get_settings
 from app.db.enums import JobStatus, JobType, SyncRunSource, SyncRunStatus
 from app.db.keys import make_path_key
 from app.db.models import Document, EmbedQuota, Job, SyncConfig, SyncRun
@@ -55,7 +58,15 @@ async def agent_run(client: httpx.AsyncClient, token: str, files: list[str]) -> 
     return body
 
 
-async def test_status_fields(chat_client: httpx.AsyncClient, session: AsyncSession) -> None:
+async def test_status_fields(
+    chat_client: httpx.AsyncClient,
+    session: AsyncSession,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 백업 폴더는 빈 임시 폴더(개발 중 만든 var/backups의 백업이 섞이지 않게)
+    monkeypatch.setenv("BACKUP_DIR", str(tmp_path / "backups"))
+    get_settings.cache_clear()
     # 아무 기록도 없으면: 실행·백업 없음 → 하루 넘음 경고
     empty = await web_get(chat_client, "/api/sync/status")
     assert empty["running"] is None and empty["latest_run"] is None
@@ -124,7 +135,7 @@ async def test_status_fields(chat_client: httpx.AsyncClient, session: AsyncSessi
     }
     assert body["embed"] == {"used": 37, "limit": 100}
     assert body["skipped_formats"] == {".doc": 3, ".xls": 1}  # 마지막 성공 실행 기준
-    assert body["stale"] == {"sync": False, "backup": True}  # 백업 기록은 T14부터
+    assert body["stale"] == {"sync": False, "backup": True}  # 백업 파일 없음
     assert body["held_deletions"] is None
     assert datetime.fromisoformat(body["now"]).tzinfo is not None
 

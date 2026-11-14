@@ -54,6 +54,7 @@ export type SyncStatus = {
   queue: { queued: number; running: number; by_type: Record<string, number> };
   embed: { used: number; limit: number };
   last_backup_at: string | null;
+  last_backup_name: string | null;
   held_deletions: HeldDeletions | null;
   skipped_formats: Record<string, number>;
   stale: { sync: boolean; backup: boolean };

@@ -24,6 +24,9 @@ export const STORAGE_STATE = path.resolve(import.meta.dirname, ".auth", "user.js
 export const TEST_DATABASE_URL =
   process.env.TEST_DATABASE_URL ?? "postgresql+psycopg://rag:rag@127.0.0.1:5433/rag_test";
 
+/** VM 백업 폴더(BACKUP_DIR). E2E 백엔드와 `rag-backend backup`이 함께 쓴다. */
+export const BACKUP_DIR = path.resolve(import.meta.dirname, ".tmp", "backups");
+
 /** 업로드 원본 임시 폴더(E2E 백엔드와 `rag-backend ingest-local`이 함께 씀). */
 export const UPLOAD_TMP_DIR = path.resolve(import.meta.dirname, ".tmp", "uploads");
 

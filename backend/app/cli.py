@@ -4,6 +4,9 @@
 
 검색(TRD 7.2): `search <질문>`(Hybrid 검색 결과와 검색 범위 확인용).
 
+수명주기(TRD 6.5, 12.2): `backup`(DB 암호화 백업), `purge-retention`(보관 기간 지난 로컬 삭제 문서
+영구 삭제). Worker 예약 작업과 같은 코드를 지금 한 번 실행한다(운영 수동 실행·E2E).
+
 인증(TRD 5.2, 11장): `create-user`, `reset-password`, `create-token`.
 - 비밀번호는 기본으로 화면에 보이지 않게 두 번 묻는다. 스크립트(E2E 등)는 `--password-stdin`으로
   표준 입력 첫 줄을 넘긴다. 명령줄 인자로는 받지 않는다(셸 기록·프로세스 목록에 남지 않게).
@@ -234,6 +237,40 @@ def worker(
         _run_async(main)
     except KeyboardInterrupt:
         pass
+
+
+@app.command()
+def backup() -> None:
+    """DB 암호화 백업을 지금 한 번 만든다(Worker의 매일 03:00 예약 작업과 같은 코드, TRD 12.2)."""
+    from app.jobs.runner import utc_now
+    from app.lifecycle.backup import BackupError, create_backup
+
+    _setup_logging()
+    try:
+        result = create_backup(get_settings(), now=utc_now())
+    except BackupError as e:
+        _fail(f"백업 실패({e.stage}: {e.code})")
+    info = result.info
+    typer.echo(
+        f"백업 완료: {info.name} ({info.size} bytes, sha256 {info.sha256}), "
+        f"오래된 백업 {len(result.removed)}개 삭제"
+    )
+
+
+@app.command("purge-retention")
+def purge_retention() -> None:
+    """보관 기간이 지난 로컬 삭제 문서를 지금 영구 삭제한다(매일 04:00 예약 작업과 같은 코드)."""
+    from app.jobs.runner import utc_now
+    from app.lifecycle.retention import purge_expired
+
+    _setup_logging()
+    days = get_settings().local_deleted_retention_days
+
+    async def work(session: AsyncSession) -> int:
+        return (await purge_expired(session, now=utc_now(), days=days)).documents
+
+    count = _run_db(work)
+    typer.echo(f"보관 기간({days}일)이 지난 로컬 삭제 문서 {count}개를 영구 삭제했습니다")
 
 
 def _parse_when(value: str | None, *, end_of_day: bool) -> datetime | None:
