@@ -1,0 +1,35 @@
+# 개발용 DB(ParadeDB: PostgreSQL 17 + pg_search + pgvector). 저장소 루트에서:
+#   docker compose up -d     # 띄우기 (127.0.0.1:5432, .env의 DATABASE_URL 기본값과 같은 계정)
+#   docker compose down      # 내리기 (데이터는 chanjin-rag-dev-pgdata 볼륨에 남음)
+#   docker compose down -v   # 데이터까지 지우기
+# 처음 띄운 뒤 한 번: uv run rag-backend migrate → uv run rag-backend create-user <아이디>
+#
+# 운영 구성은 deploy/compose.yaml, 테스트 DB(:5433, tmpfs)는 deploy/compose.test.yaml이다.
+name: chanjin-rag-dev
+
+services:
+  db:
+    image: paradedb/paradedb:0.26.5-pg17
+    container_name: chanjin-rag-dev-db
+    restart: unless-stopped
+    shm_size: 256m
+    environment:
+      TZ: Asia/Seoul
+      POSTGRES_USER: rag
+      POSTGRES_PASSWORD: rag
+      POSTGRES_DB: rag
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # 초기화 중 임시 서버는 TCP를 열지 않으므로 127.0.0.1로 최종 서버만 확인한다
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U rag -d rag"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+
+volumes:
+  pgdata:
+    # `docker run -v chanjin-rag-dev-pgdata:...`로 만든 볼륨을 그대로 이어 쓴다
+    name: chanjin-rag-dev-pgdata

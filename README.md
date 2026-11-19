@@ -14,9 +14,13 @@
 
 ## 개발 실행
 
-필요한 도구: uv, Node.js(corepack으로 pnpm 사용)
+필요한 도구: uv, Node.js(corepack으로 pnpm 사용), Docker
 
 ```bash
+# 0) 개발용 DB (ParadeDB, 127.0.0.1:5432, 데이터는 chanjin-rag-dev-pgdata 볼륨)
+#    저장소 루트의 docker-compose.yml을 쓴다. 내리기: docker compose down
+docker compose up -d
+
 # 1) Python 의존성 (Python 3.12는 uv가 자동으로 받음)
 uv sync --all-packages
 
