@@ -30,18 +30,32 @@ class _Tee:
             stream.flush()
 
 
+class _CurrentStdout:
+    """쓸 때마다 그때의 `sys.stdout`에 쓴다.
+
+    설정 당시의 stdout 객체를 붙잡고 있으면, 그 스트림이 닫힌 뒤(같은 프로세스에서 CLI를
+    여러 번 실행하는 테스트 등) 쓰기에 실패한다.
+    """
+
+    def write(self, s: str) -> int:
+        return sys.stdout.write(s)
+
+    def flush(self) -> None:
+        sys.stdout.flush()
+
+
 def configure_logging(level: str = "INFO", json: bool = False, file: str | None = None) -> None:
     # Windows에서 출력이 파이프나 파일로 가면 stdout이 cp949가 되어 한글이 깨진다.
     # 그래서 UTF-8로 고정한다.
     if isinstance(sys.stdout, io.TextIOWrapper) and sys.stdout.encoding.lower() != "utf-8":
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-    out: TextIO = sys.stdout
+    out: TextIO = _CurrentStdout()  # type: ignore[assignment]
     if file:
         path = Path(file)
         path.parent.mkdir(parents=True, exist_ok=True)
         log_file = path.open("a", encoding="utf-8")  # 프로세스가 끝날 때까지 열어 둔다
-        out = _Tee(sys.stdout, log_file)  # type: ignore[assignment]
+        out = _Tee(_CurrentStdout(), log_file)  # type: ignore[arg-type, assignment]
 
     shared: list[structlog.types.Processor] = [
         structlog.contextvars.merge_contextvars,
@@ -58,7 +72,10 @@ def configure_logging(level: str = "INFO", json: bool = False, file: str | None 
         processors=[*shared, renderer],
         wrapper_class=structlog.make_filtering_bound_logger(logging.getLevelName(level.upper())),
         logger_factory=structlog.PrintLoggerFactory(file=out),
-        cache_logger_on_first_use=True,
+        # 모듈 전역 로거(`log = get_logger(__name__)`)가 처음 쓸 때의 설정에 묶이지 않게
+        # 캐시하지 않는다. 캐시하면 설정을 다시 한 뒤(테스트의 capture_logs, CLI 재실행)에도
+        # 옛 설정으로 쓴다.
+        cache_logger_on_first_use=False,
     )
 
 

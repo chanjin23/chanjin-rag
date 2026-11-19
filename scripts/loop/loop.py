@@ -58,9 +58,11 @@ SKIP_RE = re.compile(
 TEST_PATH_RE = re.compile(r"(^|/)(tests|e2e)/|(^|/)test_[^/]*\.py$|\.(spec|test)\.tsx?$")
 DOC_EXTS = {".pdf", ".hwp", ".hwpx", ".docx", ".xlsx", ".pptx", ".doc", ".xls", ".ppt"}
 
+# 한도 메시지 예: "You've hit your 5-hour limit · resets 1:10am (Asia/Seoul)"
+# JSON 출력의 api_error 값(usage_limit_reached 등)도 함께 검사하므로 밑줄 표기도 받는다.
 LIMIT_RE = re.compile(
-    r"usage limit|limit reached|hit your (usage )?limit|out of (extra )?usage|"
-    r"(session|weekly) limit|rate[_ ]limit",
+    r"usage[_ ]limit|limit[_ ]reached|hit your [\w -]{0,20}limit|out of (extra )?usage|"
+    r"(session|weekly|[\w-]+-hour) limit|rate[_ ]limit",
     re.IGNORECASE,
 )
 TRANSIENT_RE = re.compile(r"overloaded|\b529\b|api error: 5\d\d|ECONNRESET|ETIMEDOUT", re.I)
@@ -84,6 +86,15 @@ def say(msg: str) -> None:
 
 def read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def local_path(raw: str) -> str:
+    """설정의 Windows 경로(`C:\\...`)를 WSL 등 Linux에서 `/mnt/c/...`로 바꾼다.
+    Windows Smart App Control 때문에 루프를 WSL에서 돌릴 수 있도록 한다."""
+    m = re.match(r"^([A-Za-z]):[\\/](.*)$", raw)
+    if IS_WINDOWS or not m:
+        return raw
+    return f"/mnt/{m.group(1).lower()}/" + m.group(2).replace("\\", "/")
 
 
 def write_json(path: Path, data: Any) -> None:
@@ -354,13 +365,18 @@ def run_claude(args: list[str], prompt: str, timeout_s: float, log_path: Path) -
     data = parse_json_output(out)
     failed = code != 0 or (data is not None and bool(data.get("is_error")))
     haystack = out + ("\n" + str(data.get("result", "")) if data else "")
+    # 메시지 문구는 바뀔 수 있으므로 구조화 필드(api_error_status, api_error)를 먼저 본다.
+    status = data.get("api_error_status") if data else None
+    api_error = str(data.get("api_error") or "") if data else ""
+    limited = status == 429 or bool(LIMIT_RE.search(api_error)) or bool(LIMIT_RE.search(haystack))
+    server_error = isinstance(status, int) and status >= 500
     return ClaudeResult(
         exit_code=code,
         output=out,
         data=data,
         timed_out=timed_out,
-        usage_limited=failed and bool(LIMIT_RE.search(haystack)),
-        transient=failed and bool(TRANSIENT_RE.search(haystack)),
+        usage_limited=failed and limited,
+        transient=failed and (server_error or bool(TRANSIENT_RE.search(haystack))),
         no_session=failed and bool(NO_SESSION_RE.search(haystack)),
         reset_at=parse_reset(haystack) if failed else None,
         duration_s=time.monotonic() - start,
@@ -414,12 +430,16 @@ def step_implement(
     run_dir: Path,
     budget_s: float,
     resume: bool,
+    state: dict[str, Any],
 ) -> tuple[str, float]:
     """구현 세션을 돌린다. (결과 요약, 실제 사용 시간)을 돌려준다. 한도 대기 시간은 제외.
 
     - 첫 시도와 `fresh_session_from_attempt` 이후: 새 세션 + implement.md
     - 그 사이 재시도: 같은 세션 이어가기 + fix.md(피드백)
     - 루프 자체가 중간에 끊겼다가 다시 시작(resume=True): 같은 세션 + resume.md
+
+    새 세션 ID는 세션을 시작하기 전에 state.json에 저장한다. 루프 프로세스가 구현 도중에
+    죽어도 다시 실행했을 때 같은 세션을 이어갈 수 있게 하기 위해서다.
     """
     values = prompt_values(task, cfg, attempt, feedback)
     common = ["--dangerously-skip-permissions", "--model", cfg["implement_model"]]
@@ -433,6 +453,7 @@ def step_implement(
     else:
         args = [*common, "--resume", ts["session_id"]]
         prompt = load_prompt("fix.md", values)
+    write_json(STATE_FILE, state)
 
     used = 0.0
     part = 0
@@ -455,6 +476,7 @@ def step_implement(
         if res.no_session:
             # 세션 기록이 없으면 새 세션으로 시작한다. 진행 상황은 기억 파일에 남아 있다.
             ts["session_id"] = str(uuid.uuid4())
+            write_json(STATE_FILE, state)
             args = [*common, "--session-id", ts["session_id"]]
             prompt = load_prompt("implement.md", values)
             continue
@@ -775,7 +797,7 @@ def run_task(task: Task, state: dict[str, Any], cfg: dict[str, Any]) -> bool:
         write_json(STATE_FILE, state)
 
         result, used = step_implement(
-            task, ts, cfg, attempt, feedback, run_dir, remaining - reserve, resume
+            task, ts, cfg, attempt, feedback, run_dir, remaining - reserve, resume, state
         )
         resume = False
         ts["active_s"] += used
@@ -936,6 +958,7 @@ def main() -> int:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     cfg = read_json(LOOP_DIR / "config.json")
+    cfg["sample_docs_dirs"] = [local_path(d) for d in cfg["sample_docs_dirs"]]
     if args.max_attempts:
         cfg["max_attempts"] = args.max_attempts
     tasks = load_tasks()
@@ -976,7 +999,9 @@ def main() -> int:
             print(load_prompt("implement.md", prompt_values(first, cfg, 1, "")))
         return 0
 
-    in_progress = [tid for tid, ts in state["tasks"].items() if ts.get("status") == "in_progress"]
+    # --retry-blocked이면 막힌 작업이 남긴 변경도 이어서 쓸 작업물로 본다.
+    resumable = {"in_progress", "blocked"} if args.retry_blocked else {"in_progress"}
+    in_progress = [tid for tid, ts in state["tasks"].items() if ts.get("status") in resumable]
     dirty = bool(git("status", "--porcelain").strip())
     if dirty and not in_progress:
         say("커밋되지 않은 변경이 있는데 진행 중인 작업이 없습니다. 정리한 뒤 실행하세요.")

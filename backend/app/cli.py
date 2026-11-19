@@ -1,10 +1,39 @@
-"""백엔드 관리 CLI. create-user, create-token, reindex는 DB를 붙일 때 추가한다."""
+"""백엔드 관리 CLI(`rag-backend`). reindex는 해당 작업에서 추가한다.
+
+수집(TRD 6.2): `worker`(Ingestion Worker), `ingest-local <폴더>`(개발·E2E 시드).
+
+검색(TRD 7.2): `search <질문>`(Hybrid 검색 결과와 검색 범위 확인용).
+
+수명주기(TRD 6.5, 12.2): `backup`(DB 암호화 백업), `purge-retention`(보관 기간 지난 로컬 삭제 문서
+영구 삭제). Worker 예약 작업과 같은 코드를 지금 한 번 실행한다(운영 수동 실행·E2E).
+
+인증(TRD 5.2, 11장): `create-user`, `reset-password`, `create-token`.
+- 비밀번호는 기본으로 화면에 보이지 않게 두 번 묻는다. 스크립트(E2E 등)는 `--password-stdin`으로
+  표준 입력 첫 줄을 넘긴다. 명령줄 인자로는 받지 않는다(셸 기록·프로세스 목록에 남지 않게).
+- Agent 토큰 평문은 발급할 때 한 번만 출력한다. DB에는 SHA-256만 저장한다.
+"""
+
+import asyncio
+import signal
+import sys
+from collections.abc import Awaitable, Callable, Coroutine
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Annotated, Any, NoReturn
+from zoneinfo import ZoneInfo
 
 import typer
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.core.logging import configure_logging, get_logger
 
 app = typer.Typer(no_args_is_help=True)
+
+
+def _setup_logging() -> None:
+    settings = get_settings()
+    configure_logging(settings.log_level, json=settings.log_json, file=settings.log_file)
 
 
 @app.command()
@@ -12,6 +41,324 @@ def show_config() -> None:
     """현재 설정을 출력한다(비밀값은 가림)."""
     for key, value in get_settings().model_dump().items():
         typer.echo(f"{key} = {value}")
+
+
+@app.command()
+def migrate(
+    revision: str = typer.Argument("head", help="올릴 리비전(기본 head)"),
+) -> None:
+    """DB 스키마를 올린다(`alembic upgrade`). 대상 DB는 `DATABASE_URL`."""
+    from app.db import migrate as db_migrate
+
+    _setup_logging()
+    db_migrate.upgrade(revision)
+
+
+@app.command()
+def downgrade(
+    revision: str = typer.Argument(..., help="내릴 리비전(예: -1, base)"),
+) -> None:
+    """DB 스키마를 내린다(`alembic downgrade`). `base`는 모든 테이블을 지운다."""
+    from app.db import migrate as db_migrate
+
+    _setup_logging()
+    db_migrate.downgrade(revision)
+
+
+def _run_async[T](main: Callable[[], Coroutine[Any, Any, T]]) -> T:
+    if sys.platform == "win32":
+        # psycopg async는 Windows Proactor 루프에서 동작하지 않는다(app.db.engine 참고)
+        return asyncio.run(main(), loop_factory=asyncio.SelectorEventLoop)
+    return asyncio.run(main())
+
+
+def _run_db[T](work: Callable[[AsyncSession], Awaitable[T]]) -> T:
+    """명령 하나를 DB 트랜잭션 하나로 실행하고 commit한다. 엔진은 명령마다 만들고 닫는다."""
+    from app.db.engine import create_engine, create_sessionmaker
+
+    async def main() -> T:
+        engine = create_engine()
+        try:
+            async with create_sessionmaker(engine)() as session:
+                result = await work(session)
+                await session.commit()
+                return result
+        finally:
+            await engine.dispose()
+
+    return _run_async(main)
+
+
+def _read_password(from_stdin: bool) -> str:
+    if from_stdin:
+        return sys.stdin.readline().rstrip("\r\n")
+    password: str = typer.prompt("비밀번호", hide_input=True, confirmation_prompt=True)
+    return password
+
+
+def _fail(message: str) -> NoReturn:
+    typer.echo(f"오류: {message}", err=True)
+    raise typer.Exit(1)
+
+
+@app.command("create-user")
+def create_user(
+    username: str = typer.Argument(..., help="로그인 아이디"),
+    password_stdin: bool = typer.Option(
+        False, "--password-stdin", help="비밀번호를 묻지 않고 표준 입력 첫 줄에서 읽는다"
+    ),
+) -> None:
+    """웹 로그인 사용자를 만든다(단일 계정: 이미 있으면 실패)."""
+    from app.core import auth
+
+    _setup_logging()
+    password = _read_password(password_stdin)
+    try:
+        user = _run_db(lambda s: auth.create_user(s, username, password))
+    except auth.AuthError as e:
+        _fail(str(e))
+    get_logger("app.cli").info("auth.user.created", user_id=user.id)
+    typer.echo(f"사용자를 만들었습니다: {user.username} (id={user.id})")
+
+
+@app.command("reset-password")
+def reset_password(
+    username: str = typer.Argument(..., help="로그인 아이디"),
+    password_stdin: bool = typer.Option(
+        False, "--password-stdin", help="비밀번호를 묻지 않고 표준 입력 첫 줄에서 읽는다"
+    ),
+) -> None:
+    """비밀번호를 바꾼다. 잠금을 풀고 기존 로그인 세션을 모두 끊는다."""
+    from app.core import auth
+
+    _setup_logging()
+    password = _read_password(password_stdin)
+    try:
+        user = _run_db(lambda s: auth.reset_password(s, username, password))
+    except auth.AuthError as e:
+        _fail(str(e))
+    get_logger("app.cli").info("auth.password.reset", user_id=user.id)
+    typer.echo(f"비밀번호를 바꾸고 잠금을 풀었습니다: {user.username}")
+
+
+@app.command("create-token")
+def create_token(
+    name: str = typer.Argument(..., help="토큰 이름(예: 집 PC)"),
+) -> None:
+    """Sync Agent용 API 토큰을 발급한다. 평문 토큰은 지금 한 번만 보여준다."""
+    from app.core import auth
+
+    _setup_logging()
+    token, raw = _run_db(lambda s: auth.create_api_token(s, name))
+    get_logger("app.cli").info("auth.token.created", token_id=token.id)
+    typer.echo(f"토큰을 발급했습니다: {token.name} (id={token.id})")
+    typer.echo("아래 토큰은 다시 볼 수 없습니다. Agent에 바로 등록하세요(`rag-agent login`).")
+    typer.echo(raw)
+
+
+async def _close_provider(provider: object) -> None:
+    aclose = getattr(provider, "aclose", None)
+    if aclose is not None:
+        await aclose()
+
+
+@app.command("ingest-local")
+def ingest_local(
+    folder: Annotated[Path, typer.Argument(help="수집할 로컬 폴더(SYNC_ALLOWED_ROOT 하위)")],
+    process: bool = typer.Option(
+        True, "--process/--no-process", help="큐에 넣은 뒤 바로 처리할지(기본: 처리)"
+    ),
+) -> None:
+    """로컬 폴더 파일을 업로드와 같은 방식으로 큐에 넣고 처리한다(개발·E2E 시드용, Agent 불필요)."""
+    from app.db.engine import create_engine, create_sessionmaker
+    from app.ingest.local import LocalIngestReport, OutOfScopeError
+    from app.ingest.local import ingest_local as run_ingest
+    from app.jobs.runner import JobRunner
+    from app.providers.factory import create_embedding_provider
+    from app.providers.monitor import configure_recorder, monitored_embedder
+
+    _setup_logging()
+
+    async def main() -> LocalIngestReport:
+        engine = create_engine()
+        provider = monitored_embedder(create_embedding_provider()) if process else None
+        try:
+            sessionmaker = create_sessionmaker(engine)
+            configure_recorder(sessionmaker)  # /health의 Provider 상태(TRD 12.4)
+            runner = JobRunner(sessionmaker, provider) if provider is not None else None
+            return await run_ingest(sessionmaker, folder, runner=runner)
+        finally:
+            if provider is not None:
+                await _close_provider(provider)
+            await engine.dispose()
+
+    try:
+        report = _run_async(main)
+    except OutOfScopeError as e:
+        _fail(f"수집 범위 밖의 폴더입니다({e.reason}). SYNC_ALLOWED_ROOT 하위만 수집합니다")
+    typer.echo(
+        f"접수: 새 버전 {report.queued}, 변경 없음 {report.unchanged}, "
+        f"파일명만 {report.meta_only}, 건너뜀 {sum(report.skipped.values())}"
+    )
+    if report.run is not None:
+        typer.echo(f"처리한 작업: {report.run.total} {report.run.counts}")
+        if report.run.quota_exhausted is not None:
+            q = report.run.quota_exhausted
+            typer.echo(f"임베딩 한도 도달({q.reason}): {q.resume_at.isoformat()}에 다시 처리합니다")
+    typer.echo(f"문서 상태: {report.statuses}")
+
+
+@app.command()
+def worker(
+    name: str = typer.Option("worker", help="하트비트에 기록할 Worker 이름"),
+) -> None:
+    """Ingestion Worker를 실행한다(작업 큐 + APScheduler). Ctrl+C로 멈춘다."""
+    from app.db.engine import create_engine, create_sessionmaker
+    from app.jobs.runner import JobRunner
+    from app.jobs.worker import Worker
+    from app.providers.factory import create_embedding_provider
+    from app.providers.monitor import configure_recorder, monitored_embedder
+
+    _setup_logging()
+
+    async def main() -> None:
+        engine = create_engine()
+        provider = monitored_embedder(create_embedding_provider())
+        sessionmaker = create_sessionmaker(engine)
+        configure_recorder(sessionmaker)  # /health의 Provider 상태(TRD 12.4)
+        w = Worker(JobRunner(sessionmaker, provider), sessionmaker, name=name)
+        loop = asyncio.get_running_loop()
+        if sys.platform != "win32":
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(sig, w.stop)
+        try:
+            await w.run()
+        finally:
+            await _close_provider(provider)
+            await engine.dispose()
+
+    try:
+        _run_async(main)
+    except KeyboardInterrupt:
+        pass
+
+
+@app.command()
+def backup() -> None:
+    """DB 암호화 백업을 지금 한 번 만든다(Worker의 매일 03:00 예약 작업과 같은 코드, TRD 12.2)."""
+    from app.jobs.runner import utc_now
+    from app.lifecycle.backup import BackupError, create_backup
+
+    _setup_logging()
+    try:
+        result = create_backup(get_settings(), now=utc_now())
+    except BackupError as e:
+        _fail(f"백업 실패({e.stage}: {e.code})")
+    info = result.info
+    typer.echo(
+        f"백업 완료: {info.name} ({info.size} bytes, sha256 {info.sha256}), "
+        f"오래된 백업 {len(result.removed)}개 삭제"
+    )
+
+
+@app.command("purge-retention")
+def purge_retention() -> None:
+    """보관 기간이 지난 로컬 삭제 문서를 지금 영구 삭제한다(매일 04:00 예약 작업과 같은 코드)."""
+    from app.jobs.runner import utc_now
+    from app.lifecycle.retention import purge_expired
+
+    _setup_logging()
+    days = get_settings().local_deleted_retention_days
+
+    async def work(session: AsyncSession) -> int:
+        return (await purge_expired(session, now=utc_now(), days=days)).documents
+
+    count = _run_db(work)
+    typer.echo(f"보관 기간({days}일)이 지난 로컬 삭제 문서 {count}개를 영구 삭제했습니다")
+
+
+def _parse_when(value: str | None, *, end_of_day: bool) -> datetime | None:
+    """`2026-10-01` 또는 ISO 시각. 시간대가 없으면 한국 시간(TRD 5장). 날짜만 주면 그날 시작·끝."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        _fail(f"날짜 형식이 아닙니다: {value} (예: 2026-10-01)")
+    if len(value) == 10 and end_of_day:
+        parsed = parsed + timedelta(days=1) - timedelta(microseconds=1)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ZoneInfo("Asia/Seoul"))
+    return parsed
+
+
+@app.command("search")
+def search_command(
+    query: Annotated[str, typer.Argument(help="질문(검색어)")],
+    directory: str | None = typer.Option(None, "--dir", help="디렉터리 접두어(하위 폴더 포함)"),
+    ext: Annotated[list[str] | None, typer.Option("--ext", help="형식(여러 번 지정 가능)")] = None,
+    mtime_from: str | None = typer.Option(None, "--from", help="수정일 시작(예: 2026-10-01)"),
+    mtime_to: str | None = typer.Option(None, "--to", help="수정일 끝(그날 포함)"),
+    exclude_deleted: bool = typer.Option(
+        False, "--exclude-deleted", help="로컬에서 삭제된 문서 제외(기본: 포함)"
+    ),
+    limit: int = typer.Option(30, help="최대 결과 수"),
+    as_json: bool = typer.Option(False, "--json", help="JSON으로 출력"),
+) -> None:
+    """Hybrid 검색(벡터 + BM25, RRF)을 실행하고 결과와 검색 범위를 출력한다(개발·E2E 확인용)."""
+    import json
+
+    from app.providers.factory import create_embedding_provider
+    from app.query.search import SearchFilters, SearchResult, search
+
+    _setup_logging()
+    filters = SearchFilters(
+        directory=directory,
+        exts=ext or None,
+        mtime_from=_parse_when(mtime_from, end_of_day=False),
+        mtime_to=_parse_when(mtime_to, end_of_day=True),
+        include_deleted=not exclude_deleted,
+    )
+
+    async def work(session: AsyncSession) -> SearchResult:
+        embedder = create_embedding_provider()
+        try:
+            return await search(session, embedder, query, filters=filters, limit=limit)
+        finally:
+            await _close_provider(embedder)
+
+    result = _run_db(work)
+    if as_json:
+        payload = {
+            "coverage": result.coverage.as_dict(),
+            "latency_ms": result.latency_ms,
+            "vector_used": result.vector_used,
+            "hits": [
+                {
+                    **hit.log_entry(),
+                    "path": hit.path,
+                    "location": hit.location,
+                    "mtime": hit.mtime.isoformat(),
+                    "locally_deleted": hit.locally_deleted,
+                    "snippet": hit.snippet,
+                }
+                for hit in result.hits
+            ],
+        }
+        typer.echo(json.dumps(payload, ensure_ascii=False))
+        return
+    cov = result.coverage
+    typer.echo(
+        f"검색 범위: 키워드 {cov.bm25_docs} · 의미 {cov.vector_docs} · 대기 {cov.pending_docs}"
+        f" (필터에 맞는 문서 {cov.total_docs}, 필터 {cov.filters_applied or '없음'})"
+    )
+    for hit in result.hits:
+        deleted = " [로컬 삭제됨]" if hit.locally_deleted else ""
+        typer.echo(
+            f"{hit.rank:>2}. {hit.rrf_score:.4f} (벡터 {hit.vector_rank or '-'}, "
+            f"BM25 {hit.bm25_rank or '-'}) {hit.path} {hit.location}{deleted}\n    {hit.snippet}"
+        )
+    typer.echo(f"결과 {len(result.hits)}건, 지연 {result.latency_ms}")
 
 
 @app.command()

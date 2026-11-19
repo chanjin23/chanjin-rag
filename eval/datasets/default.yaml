@@ -1,0 +1,42 @@
+# 예제 평가셋 (형식 안내용, 합성 문서 기준). 형식: eval/rag_eval/dataset.py
+#
+# 실제 평가셋은 내 문서로 30~50문항을 만들고 PRD 8장 비율(단일 40%, 종합 20%, 표·슬라이드 15%,
+# 답 없음 15%, HWP 10%)을 맞춘다. 이 예제의 근거 문서는 eval/datasets/synthetic/에 있으며,
+# C:\Chanjin\dev\rag-eval-sample\로 복사해 동기화한 뒤 `rag-eval run`으로 실행할 수 있다.
+# 라벨 경로가 documents에 없으면 그 문항은 경고 후 지표에서 빠진다.
+# 표·슬라이드(table)·HWP(hwp) 유형 문항은 해당 파서(T18) 이후 추가한다.
+version: 1
+items:
+  - id: single-001
+    type: single
+    question: 용역 계약의 위약금은 계약 금액의 몇 퍼센트인가?
+    answer: 위약금은 계약 금액의 10%이다.
+    evidence:
+      - path: C:\Chanjin\dev\rag-eval-sample\계약서.md
+        location: {}
+  - id: single-002
+    type: single
+    question: 알파 프로젝트의 마감일은 언제인가?
+    answer: 알파 프로젝트의 마감일은 12월 15일이다.
+    evidence:
+      - path: C:\Chanjin\dev\rag-eval-sample\알파-프로젝트.md
+        location: {}
+  - id: single-003
+    type: single
+    question: 주간 회의는 언제 하나?
+    answer: 주간 회의는 매주 월요일 10시에 한다.
+    evidence:
+      - path: C:\Chanjin\dev\rag-eval-sample\회의록.txt
+        location: {lines: [3, 3]}
+  - id: multi-001
+    type: multi
+    question: 알파 프로젝트 담당 팀과 배포 담당 팀은 각각 어디인가?
+    answer: 알파 프로젝트 담당자는 기획팀이고 배포 담당자는 개발팀이다.
+    evidence:
+      - path: C:\Chanjin\dev\rag-eval-sample\알파-프로젝트.md
+        location: {}
+      - path: C:\Chanjin\dev\rag-eval-sample\회의록.txt
+        location: {}
+  - id: none-001
+    type: not_found
+    question: 화성 탐사선의 연료 탱크 용량은 얼마인가?

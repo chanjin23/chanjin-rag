@@ -15,7 +15,8 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/api": { target: apiTarget, changeOrigin: true },
+      // Host를 바꾸지 않아야 백엔드의 CSRF Origin 검사(Origin == Host)가 통과한다(TRD 11장).
+      "/api": { target: apiTarget, changeOrigin: false },
     },
   },
 });
