@@ -137,6 +137,53 @@ test.describe("채팅 (F-08 질의 그래프와 SSE)", () => {
     expect(JSON.stringify(completed)).not.toContain(CODE);
   });
 
+  test("새로 고침 직후 바로 보낸 질문이 늦게 도착한 대화 기록에 덮이지 않는다", async ({ page }) => {
+    const first = `${CODE} 프로젝트 마감일 알려줘 (새로 고침 전)`;
+    const second = `${CODE} 프로젝트 마감일 알려줘 (새로 고침 직후)`;
+    await page.goto("/");
+    await ask(page, first);
+    await expect(page.getByText(/자료에 따르면 .*12월 15일이다\. \[\d\]/)).toBeVisible();
+    await expect(page.getByRole("button", { name: "전송" })).toBeVisible();
+    await expect(page).toHaveURL(/\/c\/\d+$/);
+    const id = new URL(page.url()).pathname.split("/").pop();
+
+    // 저장된 대화 기록(GET /api/conversations/{id}) 응답을 늦춰, 기록보다 질문이 먼저 나가는 경합을 만든다
+    await page.route(`**/api/conversations/${id}`, async (route) => {
+      if (route.request().method() === "GET") await new Promise((r) => setTimeout(r, 2_000));
+      await route.continue();
+    });
+    const since = backendLogMark();
+    const history = page.waitForResponse(
+      (r) => r.request().method() === "GET" && new URL(r.url()).pathname === `/api/conversations/${id}`,
+    );
+    await page.reload();
+    const input = page.getByPlaceholder(/질문을 입력하세요/);
+    await input.fill(second);
+    await input.press("Enter");
+    await expect(input).toHaveValue("");
+    await history;
+
+    // 화면: 기록을 받은 뒤에도 이전 질문과 방금 보낸 질문, 그 답변이 모두 남는다
+    await expect(log(page).getByText(first, { exact: true })).toBeVisible();
+    await expect(log(page).getByText(second, { exact: true })).toBeVisible();
+    await expect(log(page).getByTestId("assistant-message")).toHaveCount(2);
+    await expect(log(page).getByTestId("assistant-message").last()).toContainText("12월 15일", {
+      timeout: 10_000,
+    });
+
+    // 백엔드: 같은 대화에 이어서 받고(이전 질문·답변 2개가 history) 답변을 마쳤다
+    const received = await waitForBackendLog(
+      (r) => r.event === "chat.message.received" && r.text === second,
+      { since },
+    );
+    expect(String(received.conversation_id)).toBe(id);
+    expect(received.history).toBe(2);
+    await waitForBackendLog(
+      (r) => r.event === "chat.message.completed" && r.message_id === received.message_id,
+      { since },
+    );
+  });
+
   test("문서에 없는 질문은 찾지 못함과 검색 범위를 보여준다", async ({ page }) => {
     const question = `${codeName(stamp + 7)} 화성 기지의 산소 공급량은?`;
     const since = backendLogMark();

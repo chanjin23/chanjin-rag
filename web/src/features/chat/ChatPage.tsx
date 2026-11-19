@@ -39,7 +39,7 @@ import { getSetupStatus, SETUP_STATUS_KEY, type SetupStatus } from "@/api/setup"
 import { SetupChecklist } from "@/features/setup/SetupChecklist";
 import { fileName } from "./format";
 import { type PanelFocus, SourcePanel } from "./SourcePanel";
-import { type ChatMessage, fromStored, useChatStream } from "./useChatStream";
+import { type ChatMessage, fromStored, type SendOptions, useChatStream } from "./useChatStream";
 
 /**
  * 채팅 화면 (TRD 9.1, 9.2): 왼쪽 대화 목록, 가운데 메시지·필터·입력창(위에 색인 범위 한 줄),
@@ -286,11 +286,30 @@ function ChatView({ conversationId, viewKey }: { conversationId: string; viewKey
   const setup = useQuery({ queryKey: SETUP_STATUS_KEY, queryFn: getSetupStatus, retry: 1 });
   const listed = conversations.data?.find((c) => c.id === numericId);
   const loaded = useRef(false);
+  // 저장된 메시지를 불러오기 전에 보낸 질문(예: 새로 고침 직후 바로 Enter). 먼저 보내면 늦게 도착한
+  // 기록이 방금 보낸 질문과 스트리밍 중인 답변을 덮어쓰므로, 기록을 받은 뒤(또는 못 받으면) 보낸다.
+  const queued = useRef<{ text: string; options: SendOptions } | null>(null);
+  const flushQueued = useCallback(() => {
+    const next = queued.current;
+    queued.current = null;
+    if (next) void send(next.text, next.options);
+  }, [send]);
   useEffect(() => {
     if (!detail.data || loaded.current) return;
     loaded.current = true;
     setMessages(detail.data.messages.map(fromStored));
-  }, [detail.data, setMessages]);
+    flushQueued();
+  }, [detail.data, setMessages, flushQueued]);
+  useEffect(() => {
+    if (detail.isError) flushQueued();
+  }, [detail.isError, flushQueued]);
+  const sendOrQueue = (text: string, options: SendOptions) => {
+    if (loadFromServer && !loaded.current && !detail.isError) {
+      queued.current = { text, options };
+      return;
+    }
+    void send(text, options);
+  };
 
   // 문서 상세에서 "이 문서 요약"으로 들어오면 그 문서를 요약해 달라고 보낸다(summarize_document_id)
   useEffect(() => {
@@ -316,19 +335,19 @@ function ChatView({ conversationId, viewKey }: { conversationId: string; viewKey
   const submit = (e?: FormEvent) => {
     e?.preventDefault();
     const text = input.trim();
-    if (!text || isStreaming) return;
+    if (!text || isStreaming || queued.current) return;
     setInput("");
     clearDraft(conversationId);
     setSelected(null);
     setFocus(null);
-    void send(text, { filters: toApiFilters(filters) });
+    sendOrQueue(text, { filters: toApiFilters(filters) });
   };
 
   const summarize = (source: Source) => {
-    if (isStreaming) return;
+    if (isStreaming || queued.current) return;
     setSelected(null);
     setFocus(null);
-    void send(`「${fileName(source.path)}」 요약해줘`, {
+    sendOrQueue(`「${fileName(source.path)}」 요약해줘`, {
       summarizeDocumentId: source.document_id,
       filters: toApiFilters(filters),
     });
